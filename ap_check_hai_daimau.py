@@ -276,6 +276,7 @@ class PCBCheckerApp:
             return None, None, "Không có dữ liệu ảnh!", []
         # Ép kiểu dữ liệu an toàn
         cx, cy, r_input = int(cx), int(cy), int(r_input)
+        r_input1=int(r_input*1.11)
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         blurred = cv2.GaussianBlur(gray, (3, 3), 0)
         diameter_in = r_input * 2
@@ -286,10 +287,6 @@ class PCBCheckerApp:
         cv2.circle(img, (cx, cy), r_input, (255, 255, 0), 2)       # Cyan
         cv2.circle(img, (cx, cy), r_out, (0, 255, 255), 2)     # Vàng
         
-        # # Hiển thị chữ đường kính
-        # text_dia = f"Dia: {diameter_in}px"
-        # cv2.putText(img, text_dia, (cx - 40, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
-
         # 2. TẠO TẤM MASK NỀN XANH PCB (HSV)
         hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
         lower_green = np.array([35, 40, 40])
@@ -332,8 +329,8 @@ class PCBCheckerApp:
             for angle in np.linspace(a_start, a_end, 30):
                 rad = math.radians(angle)
                 cos_a, sin_a = math.cos(rad), math.sin(rad)
-
-                for r in range(r_input + 8, r_out - 3):
+            
+                for r in range(r_input1, r_out):# 1.12 LÀ BẰNG 75% MIN( lỌC NHIỄU ) for r in range(r_input + 15, r_out - 3):
                     px = int(cx + r * cos_a)
                     py = int(cy + r * sin_a)
                     if 0 <= px < img.shape[1] and 0 <= py < img.shape[0]:
@@ -459,6 +456,8 @@ class PCBCheckerApp:
         avg_cx, avg_cy, avg_r_in, avg_angle_offset, last_frame = self.detect_connector_pose()
         if avg_cx is None or last_frame is None:
             messagebox.showwarning("Cảnh báo", "Không tìm thấy Connector!")
+            self.lbl_result.config(text="NOT CONECTOR", fg="red")
+            # Mở lại nút bấm sau khi chụp xong
             self.btn_inspect.config(state="normal", text="🔍 KIỂM TRA CONNECTOR")
             return
 
@@ -593,12 +592,17 @@ class PCBCheckerApp:
                     try:
                         val_px = float(str(avg_area_str).replace("px", "").strip())
                         val_um = val_px*1.575/avg_r_in;
-                        display_val = f"{val_um:.3f} mm"
+                        if(val_um>0):
+                            display_val = f"{val_um:.3f} mm"
+                        else:    
+                            display_val = f"Không tìm thấy..."
                     except ValueError:
-                        display_val = f"{avg_area_str} mm"
-
-                    # Xác định chuỗi hiển thị và màu sắc (BGR: Xanh lá cho OK, Đỏ cho NG)
-                    text_str = f"Tai {i+1}: {display_val} ({ear_status})"
+                        display_val = f"Không tìm thấy..."
+                    if(val_px>0):
+                        # Xác định chuỗi hiển thị và màu sắc (BGR: Xanh lá cho OK, Đỏ cho NG)
+                        text_str = f"{display_val} ({ear_status})"
+                    else:
+                        text_str = f"{display_val}"
                     bgr_color = (0, 0, 255) if ear_status == "NG" else (0, 255, 0)
 
                     # Tính tọa độ (x, y) của từng tai trên ảnh full
@@ -628,29 +632,30 @@ class PCBCheckerApp:
                     # VẼ ĐƯỜNG VẠCH MÀU ĐỎ 25PX VUÔNG GÓC VỚI TIA QUÉT (TẠI ĐỈNH MÉP TAI)
                     # -------------------------------------------------------------
                     # 1. Tọa độ đỉnh mép tai (bán kính R_in + val_px)
-                    r_outer = avg_r_in + val_px
-                    x_top = avg_cx + r_outer * math.cos(rad)
-                    y_top = avg_cy - r_outer * math.sin(rad)
+                    if(val_px>0):
+                        r_outer = avg_r_in + val_px
+                        x_top = avg_cx + r_outer * math.cos(rad)
+                        y_top = avg_cy - r_outer * math.sin(rad)
 
-                    # 2. Vector vuông góc với tia quét tại đỉnh mép tai
-                    perp_rad = rad + math.pi / 2.0
+                        # 2. Vector vuông góc với tia quét tại đỉnh mép tai
+                        perp_rad = rad + math.pi / 2.0
 
-                    # 3. Tọa độ 2 đầu đoạn thẳng 25px ôm theo mép tai
-                    x_perp1 = int(x_top + 25 * math.cos(perp_rad))
-                    y_perp1 = int(y_top - 25 * math.sin(perp_rad))
+                        # 3. Tọa độ 2 đầu đoạn thẳng 25px ôm theo mép tai
+                        x_perp1 = int(x_top + 25 * math.cos(perp_rad))
+                        y_perp1 = int(y_top - 25 * math.sin(perp_rad))
 
-                    x_perp2 = int(x_top - 25 * math.cos(perp_rad))
-                    y_perp2 = int(y_top + 25 * math.sin(perp_rad))
+                        x_perp2 = int(x_top - 25 * math.cos(perp_rad))
+                        y_perp2 = int(y_top + 25 * math.sin(perp_rad))
 
-                    # 4. Vẽ đường vạch màu đỏ nằm trên mép tai
-                    cv2.line(
-                        full_result_img,
-                        (x_perp1, y_perp1),
-                        (x_perp2, y_perp2),
-                        (0, 0, 255),  # Màu đỏ (BGR)
-                        2,            # Độ dày nét vẽ
-                        cv2.LINE_AA
-                    )
+                        # 4. Vẽ đường vạch màu đỏ nằm trên mép tai
+                        cv2.line(
+                            full_result_img,
+                            (x_perp1, y_perp1),
+                            (x_perp2, y_perp2),
+                            (0, 0, 255),  # Màu đỏ (BGR)
+                            2,            # Độ dày nét vẽ
+                            cv2.LINE_AA
+                        )
 # -------------------------------------------------------------
                     # A. TỌA ĐỘ TÂM ĐIỂM TAI (ĐỈNH MÉP TAI)
                     # -------------------------------------------------------------
