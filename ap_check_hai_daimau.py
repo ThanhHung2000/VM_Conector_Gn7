@@ -5,7 +5,16 @@ import tkinter as tk
 from tkinter import messagebox
 from PIL import Image, ImageTk
 import gc  # Thêm thư viện dọn rác ở đầu file: import gc
-
+NUM_SAMPLES = 5
+def get_best_camera_index():
+    # Thử kiểm tra Camera 1 trước (thường là Cam USB cắm ngoài)
+    cap1 = cv2.VideoCapture(1, cv2.CAP_DSHOW)
+    if cap1.isOpened():
+        cap1.release()
+        return 1  # Ưu tiên lấy camera USB ngoài
+    
+    # Nếu không có Cam 1 thì quay về Cam 0 (Webcam có sẵn trên máy)
+    return 0
 class PCBCheckerApp:
     def __init__(self, root):
         self.root = root
@@ -16,10 +25,9 @@ class PCBCheckerApp:
         self.cap = None
         self.is_camera_connected = False
         self.is_inspecting = False
-
-        # # Khởi tạo Camera
-        # SỬA THÀNH (Thêm cv2.CAP_DSHOW để chạy ổn định, không bị lỗi MSMF):
-        self.cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+        # Lúc khởi tạo camera trong ứng dụng:
+        cam_index = get_best_camera_index()
+        self.cap = cv2.VideoCapture(cam_index, cv2.CAP_DSHOW)
         # Cài đặt camera về độ phân giải Full HD (1920x1080) hoặc HD (1280x720)
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
@@ -81,7 +89,9 @@ class PCBCheckerApp:
         if self.cap is not None:
             self.cap.release() # Giải phóng tài nguyên cũ nếu có
 
-        self.cap = cv2.VideoCapture(self.camera_index, cv2.CAP_DSHOW) # DSHOW giúp Windows nhận diện USB nhanh hơn
+        # Lúc khởi tạo camera trong ứng dụng:
+        cam_index = get_best_camera_index()
+        self.cap = cv2.VideoCapture(cam_index, cv2.CAP_DSHOW)
         if self.cap.isOpened():
             self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
@@ -179,7 +189,7 @@ class PCBCheckerApp:
         BASE_SET_0  = [0, 60, 120, 180, 240, 300]   # Trường hợp 1: Hệ 0 độ
         BASE_SET_30 = [30, 90, 150, 210, 270, 330] # Trường hợp 2: Hệ 30 độ
 
-        for _ in range(5):
+        for _ in range(NUM_SAMPLES):
             ret, frame = self.cap.read()
             if not ret or frame is None:
                 continue
@@ -193,13 +203,13 @@ class PCBCheckerApp:
             # 1. TÌM VÒNG TRÒN CYAN (INNER CIRCLE) TÌM TÂM
             circles = cv2.HoughCircles(
                 blurred, cv2.HOUGH_GRADIENT, dp=1.2, minDist=100,
-                param1=100, param2=25, minRadius=290, maxRadius=350
+                param1=100, param2=50, minRadius=290, maxRadius=350
             )
 
             if circles is not None:
                 circles = np.uint16(np.around(circles))
                 cx, cy, r_in = circles[0][0]
-                r_out = r_in + 100
+                r_out = int(r_in*1.4)
                 img_h, img_w = frame.shape[:2]
 
                 # 2. TÍNH SOBEL GRADIENT TÌM CẠNH
@@ -248,8 +258,9 @@ class PCBCheckerApp:
                 rad_offset = math.radians(angle_offset)
                 list_sin.append(math.sin(rad_offset))
                 list_cos.append(math.cos(rad_offset))
-
-            self.root.update()
+                            # Chờ 10ms để camera quét frame mới
+                cv2.waitKey(10)
+                self.root.update()
 
         # --- TÍNH GIÁ TRỊ TRUNG BÌNH CỦA CÁC FRAMES ---
         if len(list_cx) == 0:
@@ -276,16 +287,15 @@ class PCBCheckerApp:
             return None, None, "Không có dữ liệu ảnh!", []
         # Ép kiểu dữ liệu an toàn
         cx, cy, r_input = int(cx), int(cy), int(r_input)
-        r_input1=int(r_input*1.11)
+        r_input1=int(r_input*1.16)
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         blurred = cv2.GaussianBlur(gray, (3, 3), 0)
-        diameter_in = r_input * 2
         ear_max_height = 100 
-        r_out = r_input + ear_max_height
+        r_out = int(r_input*1.4)
 
         # Vẽ vòng Cyan và vòng Vàng
         cv2.circle(img, (cx, cy), r_input, (255, 255, 0), 2)       # Cyan
-        cv2.circle(img, (cx, cy), r_out, (0, 255, 255), 2)     # Vàng
+        #cv2.circle(img, (cx, cy), r_out, (0, 255, 255), 2)     # Vàng
         
         # 2. TẠO TẤM MASK NỀN XANH PCB (HSV)
         hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
@@ -341,7 +351,7 @@ class PCBCheckerApp:
                             if angle_diff > 90: angle_diff = 180 - angle_diff
 
                             # Lọc đúng cạnh tiếp tuyến
-                            if angle_diff < 10:
+                            if angle_diff < 18:# chọn số ngẫu nhiên
                                 valid_edge_points.append((px, py, r, cos_a, sin_a))
 
             # 2. PHÂN NHÓM THEO BÁN KÍNH VÀ CHỌN ĐOẠN CẠNH DÀI NHẤT (NẰM Ở NGOÀI)
@@ -460,8 +470,6 @@ class PCBCheckerApp:
             # Mở lại nút bấm sau khi chụp xong
             self.btn_inspect.config(state="normal", text="🔍 KIỂM TRA CONNECTOR")
             return
-
-        NUM_SAMPLES = 8
         all_distances = [[] for _ in range(6)] # Mảng lưu 10 khoảng cách của 6 tai
         last_clean_frame = None
 
@@ -485,7 +493,6 @@ class PCBCheckerApp:
                         all_distances[i].append(dist_val)
                     except ValueError:
                         all_distances[i].append(0.0)
-
             # Chờ 10ms để camera quét frame mới
             cv2.waitKey(10)
 

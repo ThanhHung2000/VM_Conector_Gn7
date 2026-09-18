@@ -5,21 +5,37 @@ import tkinter as tk
 from tkinter import messagebox
 from PIL import Image, ImageTk
 import gc  # Thêm thư viện dọn rác ở đầu file: import gc
-
+NUM_SAMPLES = 3
+def get_best_camera_index():
+    # Thử kiểm tra Camera 1 trước (thường là Cam USB cắm ngoài)
+    cap1 = cv2.VideoCapture(1, cv2.CAP_DSHOW)
+    if cap1.isOpened():
+        cap1.release()
+        return 1  # Ưu tiên lấy camera USB ngoài
+    
+    # Nếu không có Cam 1 thì quay về Cam 0 (Webcam có sẵn trên máy)
+    return 0
 class PCBCheckerApp:
     def __init__(self, root):
         self.root = root
         self.root.title("PCB Connector Inspection - Live Video & On-Demand Check")
         self.root.geometry("1400x850")
+
         # 1. BIẾN QUẢN LÝ CAMERA
         self.camera_index = 0
         self.cap = None
         self.is_camera_connected = False
         self.is_inspecting = False
 
-        # # Khởi tạo Camera
-        # SỬA THÀNH (Thêm cv2.CAP_DSHOW để chạy ổn định, không bị lỗi MSMF):
-        self.cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+        # Biến quản lý chế độ Auto & Thống kê
+        self.is_auto_running = False
+        self.total_count = 0
+        self.ok_count = 0
+        self.ng_count = 0
+
+        # Lúc khởi tạo camera trong ứng dụng:
+        cam_index = get_best_camera_index()
+        self.cap = cv2.VideoCapture(cam_index, cv2.CAP_DSHOW)
         # Cài đặt camera về độ phân giải Full HD (1920x1080) hoặc HD (1280x720)
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
@@ -30,6 +46,10 @@ class PCBCheckerApp:
         top_frame = tk.Frame(root)
         top_frame.pack(fill="x", pady=10)
 
+        # Container chứa các nút bấm và thống kê
+        btn_container = tk.Frame(top_frame)
+        btn_container.pack()
+
         # Nút bấm bắt đầu kiểm tra
         self.btn_inspect = tk.Button(
             top_frame, text="🔍 KIỂM TRA CONNECTOR", command=self.inspect_current_frame, 
@@ -37,8 +57,30 @@ class PCBCheckerApp:
         )
         self.btn_inspect.pack()
 
+# Nút Bắt đầu Auto
+        self.btn_start_auto = tk.Button(
+            btn_container, text="▶ BẮT ĐẦU AUTO", command=self.start_auto,
+            font=("Arial", 12, "bold"), bg="#2196F3", fg="white", padx=15, pady=5
+        )
+        self.btn_start_auto.pack(side="left", padx=5)
+
+        # Nút Dừng Auto
+        self.btn_stop_auto = tk.Button(
+            btn_container, text="⏹ DỪNG", command=self.stop_auto,
+            font=("Arial", 12, "bold"), bg="#f44336", fg="white", padx=15, pady=5, state="disabled"
+        )
+        self.btn_stop_auto.pack(side="left", padx=5)
+
+        # Nhãn hiển thị thống kê số lần chạy và số lần OK
+        self.lbl_stats = tk.Label(
+            btn_container, text="Số lần chạy: 0 | OK: 0 | NG: 0", 
+            font=("Arial", 11, "bold"), fg="#1976D2", padx=10
+        )
+        self.lbl_stats.pack(side="left", padx=10)
+
         self.lbl_result = tk.Label(top_frame, text="KẾT QUẢ: ĐANG LIVE CAMERA", font=("Arial", 13, "bold"), fg="gray")
         self.lbl_result.pack(pady=3)
+        
 
         # --- KHUNG CHỨA HIỂN THỊ ÁNH ---
         content_frame = tk.Frame(root)
@@ -46,11 +88,11 @@ class PCBCheckerApp:
 
         # KHUNG BÊN TRÁI: Chứa 2 ảnh lớn xếp dọc (Ảnh chính ở trên, Ảnh cạnh ở dưới)
         left_container = tk.Frame(content_frame)
-        left_container.pack(side="left", fill="both", expand=True, padx=5, pady=5)
+        left_container.pack(side="left", fill="y", expand=False, padx=5, pady=5)
 
         # 1. Khung ảnh chính (Live Video / Kết quả)
         left_frame = tk.LabelFrame(left_container, text=" ẢNH KẾT QUẢ ĐO ", font=("Arial", 10, "bold"))
-        left_frame.pack(side="top", fill="both", expand=True, pady=(0, 5))
+        left_frame.pack(side="top", fill="y", expand=False, pady=(0, 5))
 
         self.panel_main = tk.Label(left_frame, bd=1, relief="solid")
         self.panel_main.pack(padx=5, pady=5)
@@ -62,35 +104,63 @@ class PCBCheckerApp:
         self.panel_edge = tk.Label(mid_frame, bd=1, relief="solid")
         self.panel_edge.pack(padx=5, pady=5)
 
-        # 3. Khung chứa 6 ảnh tai nhỏ
-        right_frame = tk.LabelFrame(content_frame, text=" CHI TIẾT 6 TAI CONNECTOR ", font=("Arial", 10, "bold"), padx=10, pady=10)
+        # 3. Khung hiển thị ảnh kết quả tổng (chứa cả 6 nhãn tai)
+        right_frame = tk.LabelFrame(content_frame, text=" CHI TIẾT CONNECTOR ", font=("Arial", 10, "bold"), padx=10, pady=10)
         right_frame.pack(side="right", fill="both", expand=True, padx=5, pady=5)
 
-        self.ear_panels = []
-        self.ear_labels = []
+        # Lưu lại right_frame để lấy kích thước tự động điều chỉnh ảnh
+        self.right_frame = right_frame 
 
-        for i in range(6):
-            r, c = divmod(i, 2)
-            sub_frame = tk.Frame(right_frame, bd=1, relief="groove", padx=5, pady=5)
-            sub_frame.grid(row=r, column=c, padx=5, pady=5)
-
-            p = tk.Label(sub_frame)
-            p.pack()
-            l = tk.Label(sub_frame, text=f"Tai {i+1}: -", font=("Arial", 9, "bold"))
-            l.pack()
-
-            self.ear_panels.append(p)
-            self.ear_labels.append(l)
+        # Tạo DUY NHẤT 1 Label to để hiển thị bức ảnh kết quả hoàn chỉnh
+        self.lbl_full_result = tk.Label(right_frame)
+        self.lbl_full_result.pack(fill="both", expand=True)
 
         # Chạy luồng cập nhật video trực tiếp
         self.update_video_stream()
+# --- CÁC HÀM XỬ LÝ CHẾ ĐỘ AUTO ---
+    def start_auto(self):
+        """Bắt đầu chạy tự động"""
+        self.is_auto_running = True
+        self.btn_start_auto.config(state="disabled")
+        self.btn_stop_auto.config(state="normal")
+        self.btn_inspect.config(state="disabled")
+        self.run_auto_loop()
+
+    def stop_auto(self):
+        """Dừng chạy tự động"""
+        self.is_auto_running = False
+        self.btn_start_auto.config(state="normal")
+        self.btn_stop_auto.config(state="disabled")
+        self.btn_inspect.config(state="normal")
+
+    def run_auto_loop(self):
+        """Vòng lặp tự động gọi hàm inspect_current_frame mỗi 1 giây"""
+        if not self.is_auto_running:
+            return
+
+        # Gọi hàm kiểm tra hiện tại của bạn
+        status = self.inspect_current_frame()
+
+        # Nếu hàm inspect_current_frame của bạn trả về chuỗi "OK" hoặc "NG"
+        if status in ["OK", "NG"]:
+            self.total_count += 1
+            if status == "OK":
+                self.ok_count += 1
+            else:
+                self.ng_count += 1
+            self.lbl_stats.config(text=f"Số lần chạy: {self.total_count} | OK: {self.ok_count} | NG: {self.ng_count}")
+
+        # Lặp lại sau 1000ms (1 giây)
+        self.root.after(1000, self.run_auto_loop)
 
     def init_camera(self):
         """Hàm riêng chuyên khởi tạo / Reconnect Camera"""
         if self.cap is not None:
             self.cap.release() # Giải phóng tài nguyên cũ nếu có
 
-        self.cap = cv2.VideoCapture(self.camera_index, cv2.CAP_DSHOW) # DSHOW giúp Windows nhận diện USB nhanh hơn
+        # Lúc khởi tạo camera trong ứng dụng:
+        cam_index = get_best_camera_index()
+        self.cap = cv2.VideoCapture(cam_index, cv2.CAP_DSHOW)
         if self.cap.isOpened():
             self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
@@ -168,125 +238,134 @@ class PCBCheckerApp:
         # 4. Thử khởi tạo lại Camera
         self.init_camera()
 
-    def detect_connector_pose(self, img):
+    def detect_connector_pose(self):
         """
-        Hàm riêng chuyên phát hiện Tâm (cx, cy) và Góc xoay (angle) của Connector.
-        Không thực hiện cắt ROI hay đo đạc kích thước ở đây.
+        Hàm riêng chuyên phát hiện Tâm (cx, cy) và Phân loại Góc lệch (0 deg hoặc 30 deg) của Connector.
+        Chỉ phân loại vào 2 trường hợp hệ góc BASE chuẩn.
         """     
-        if img is None:
-            return None, None, "Không có dữ liệu ảnh!", []
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        blurred = cv2.GaussianBlur(gray, (3, 3), 0)
+        if self.cap is None or not self.cap.isOpened():
+            print("[ERROR] Camera chưa kết nối!")
+            return None, None, None, None, None
 
-        # 1. TÌM VÒNG TRÒN CYAN (INNER CIRCLE)
-        circles = cv2.HoughCircles(
-            blurred, cv2.HOUGH_GRADIENT, dp=1.2, minDist=100,
-            param1=100, param2=25, minRadius=290, maxRadius=350
-        )
+        list_cx = []
+        list_cy = []
+        list_r_in = []
+        list_sin = []
+        list_cos = []
+        last_frame = None
 
-        if circles is None:
-            return img, None, "KHÔNG TÌM THẤY TÂM CONNECTOR!", []
+        # Khai báo 2 Hệ góc cố định duy nhất
+        BASE_SET_0  = [0, 60, 120, 180, 240, 300]   # Trường hợp 1: Hệ 0 độ
+        BASE_SET_30 = [30, 90, 150, 210, 270, 330] # Trường hợp 2: Hệ 30 độ
 
-        circles = np.uint16(np.around(circles))
-        cx, cy, r_in = circles[0][0]
+        for _ in range(NUM_SAMPLES):
+            ret, frame = self.cap.read()
+            if not ret or frame is None:
+                continue
+                
+            last_frame = frame.copy()
 
-        diameter_in = r_in * 2
-        ear_max_height = 100 
-        r_out = r_in + ear_max_height
+            # Tiền xử lý ảnh
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            blurred = cv2.GaussianBlur(gray, (3, 3), 0)
 
-        # Vẽ vòng Cyan và vòng Vàng
-        cv2.circle(img, (cx, cy), r_in, (255, 255, 0), 2)       # Cyan
-        cv2.circle(img, (cx, cy), r_out, (0, 255, 255), 2)     # Vàng
+            # 1. TÌM VÒNG TRÒN CYAN (INNER CIRCLE) TÌM TÂM
+            circles = cv2.HoughCircles(
+                blurred, cv2.HOUGH_GRADIENT, dp=1.2, minDist=100,
+                param1=100, param2=50, minRadius=290, maxRadius=350
+            )
 
-        # Hiển thị chữ đường kính
-        text_dia = f"Dia: {diameter_in}px"
-        cv2.putText(img, text_dia, (cx - 40, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+            if circles is not None:
+                circles = np.uint16(np.around(circles))
+                cx, cy, r_in = circles[0][0]
+                r_out = int(r_in*1.4)
+                img_h, img_w = frame.shape[:2]
 
-        # 2. TẠO TẤM MASK NỀN XANH PCB (HSV)
-        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-        lower_green = np.array([35, 40, 40])
-        upper_green = np.array([90, 255, 255])
-        pcb_mask = cv2.inRange(hsv, lower_green, upper_green)
+                # 2. TÍNH SOBEL GRADIENT TÌM CẠNH
+                grad_x = cv2.Sobel(blurred, cv2.CV_64F, 1, 0, ksize=3)
+                grad_y = cv2.Sobel(blurred, cv2.CV_64F, 0, 1, ksize=3)
+                magnitude = cv2.magnitude(grad_x, grad_y)
+                magnitude = cv2.normalize(magnitude, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
 
-        # 3. TẠO BẢN ĐỒ CẠNH SẮC NÉT ĐEN TRẮNG (SOBEL GRADIENT)
-        grad_x = cv2.Sobel(blurred, cv2.CV_64F, 1, 0, ksize=3)
-        grad_y = cv2.Sobel(blurred, cv2.CV_64F, 0, 1, ksize=3)
-        magnitude = cv2.magnitude(grad_x, grad_y)
-        magnitude = cv2.normalize(magnitude, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+                # 3. HÀM PHỤ: CẢM BIẾN TỔNG ĐỘ NỔI BẬT R TẠI CÁC GÓC CỦA NGUYÊN HỆ GÓC
+                def calc_system_score(base_angles_list):
+                    total_score = 0
+                    for base_a in base_angles_list:
+                        max_r_at_angle = 0
+                        # Quét dải nhỏ +-3 độ xung quanh góc base để bù sai số cơ khí nhỏ
+                        for da in range(-3, 4):
+                            a = (base_a + da) % 360
+                            rad = math.radians(a)
+                            cos_a, sin_a = math.cos(rad), math.sin(rad)
 
-        _, edge_map_bw = cv2.threshold(magnitude, 30, 255, cv2.THRESH_BINARY)
-        edge_map_display = cv2.cvtColor(edge_map_bw, cv2.COLOR_GRAY2BGR)
-        
-        cv2.circle(edge_map_display, (cx, cy), r_in, (255, 255, 0), 1)
-        cv2.circle(edge_map_display, (cx, cy), r_out, (0, 255, 255), 1)
-        cv2.putText(edge_map_display, f"R:{r_in}px", (cx - 40, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                            for r in range(r_in + 10, r_out - 2):
+                                px = int(cx + r * cos_a)
+                                py = int(cy + r * sin_a)
+                                if 0 <= px < img_w and 0 <= py < img_h:
+                                    if magnitude[py, px] > 30:
+                                        if r > max_r_at_angle:
+                                            max_r_at_angle = r
+                        total_score += max_r_at_angle
+                    return total_score
 
-        # 4. 6 GÓC ROI CỐ ĐỊNH
-        #FIXED_ANGLES = [-35, 40, 90, 145, 210, 270] 
-        # --- BƯỚC NÂNG CẤP CÔNG NGHIỆP: TỰ ĐỘNG TÌM GÓC XOAY CONNECTOR ---
-        BASE_ANGLES = [0, 60, 120, 180, 240, 300] # Mảng góc mốc chuẩn 360/6
-        
-        # 1. Quét toàn bộ 360 độ để tìm Tai Mốc (Tai có vươn cạnh rõ nhất)
-        scan_step = 2 # Quét mỗi 2 độ một tia
-        max_edge_r = 0
-        found_key_angle = 0
+                # 4. CHẤM ĐIỂM BÌNH CHỌN HỆ 0 ĐỘ VS HỆ 30 ĐỘ
+                score_0  = calc_system_score(BASE_SET_0)
+                score_30 = calc_system_score(BASE_SET_30)
 
-        for a in range(0, 360, scan_step):
-            rad = math.radians(a)
-            cos_a, sin_a = math.cos(rad), math.sin(rad)
-            
-            # Quét từ r_in ra r_out tìm điểm cạnh Sobel
-            for r in range(r_in + 10, r_out - 2):
-                px = int(cx + r * cos_a)
-                py = int(cy + r * sin_a)
-                if 0 <= px < img.shape[1] and 0 <= py < img.shape[0]:
-                    if magnitude[py, px] > 30: # Ngưỡng cạnh rõ
-                        if r > max_edge_r:
-                            max_edge_r = r
-                            found_key_angle = a # Lưu lại góc của tai mốc tìm thấy
+                # Chọn Hệ góc có tổng điểm cao nhất
+                if score_0 >= score_30:
+                    angle_offset = 0.0
+                else:
+                    angle_offset = 30.0
 
-        # 2. Tính góc lệch Delta so với mốc 0 độ (hoặc góc mốc gần nhất)
-        # Nắn góc lệch về khoảng [-30, 30] độ quanh vạch chuẩn gần nhất
-        nearest_base = min(BASE_ANGLES, key=lambda x: abs((found_key_angle - x + 180) % 360 - 180))
-        angle_offset = (found_key_angle - nearest_base + 180) % 360 - 180
+                # Lưu dữ liệu frame này vào danh sách
+                list_cx.append(float(cx))
+                list_cy.append(float(cy))
+                list_r_in.append(float(r_in))
+                
+                # Đổi góc sang Sin/Cos để tính trung bình vector góc
+                rad_offset = math.radians(angle_offset)
+                list_sin.append(math.sin(rad_offset))
+                list_cos.append(math.cos(rad_offset))
+                            # Chờ 10ms để camera quét frame mới
+                cv2.waitKey(10)
+                self.root.update()
 
-        # 3. Tạo mảng FIXED_ANGLES ĐỘNG thích ứng với góc xoay thực tế của Connector
-        DYNAMIC_FIXED_ANGLES = [(ang + angle_offset) for ang in BASE_ANGLES]
+        # --- TÍNH GIÁ TRỊ TRUNG BÌNH CỦA CÁC FRAMES ---
+        if len(list_cx) == 0:
+            print("[WARNING] Không tìm thấy Connector!")
+            return None, None, None, None, last_frame
 
-        return float(cx), float(cy), float(angle)
+        avg_cx = float(np.mean(list_cx))
+        avg_cy = float(np.mean(list_cy))
+        avg_r_in = float(np.mean(list_r_in))
+
+        # Trung bình góc bằng lượng giác
+        avg_sin = np.mean(list_sin)
+        avg_cos = np.mean(list_cos)
+        avg_angle_offset = float(math.degrees(math.atan2(avg_sin, avg_cos)))
+
+        # Làm tròn về đúng 0.0 hoặc 30.0 tuyệt đối cho đầu ra
+        avg_angle_offset = 0.0 if abs(avg_angle_offset) < 15.0 else 30.0
+
+        return avg_cx, avg_cy, avg_r_in, avg_angle_offset, last_frame
     
-    def process_image(self, img):
+    def process_image(self, img,cx=None, cy=None, angle_offset=0.0,r_input=None):
         """Giữ nguyên 100% Thuật toán gốc của bạn"""
-        if img is None:
+        if img is None or cx is None or cy is None or r_input is None:
             return None, None, "Không có dữ liệu ảnh!", []
-
+        # Ép kiểu dữ liệu an toàn
+        cx, cy, r_input = int(cx), int(cy), int(r_input)
+        r_input1=int(r_input*1.16)
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         blurred = cv2.GaussianBlur(gray, (3, 3), 0)
-
-        # 1. TÌM VÒNG TRÒN CYAN (INNER CIRCLE)
-        circles = cv2.HoughCircles(
-            blurred, cv2.HOUGH_GRADIENT, dp=1.2, minDist=100,
-            param1=100, param2=25, minRadius=290, maxRadius=350
-        )
-
-        if circles is None:
-            return img, None, "KHÔNG TÌM THẤY TÂM CONNECTOR!", []
-
-        circles = np.uint16(np.around(circles))
-        cx, cy, r_in = circles[0][0]
-
-        diameter_in = r_in * 2
         ear_max_height = 100 
-        r_out = r_in + ear_max_height
+        r_out = int(r_input*1.4)
 
         # Vẽ vòng Cyan và vòng Vàng
-        cv2.circle(img, (cx, cy), r_in, (255, 255, 0), 2)       # Cyan
-        cv2.circle(img, (cx, cy), r_out, (0, 255, 255), 2)     # Vàng
-
-        # Hiển thị chữ đường kính
-        text_dia = f"Dia: {diameter_in}px"
-        cv2.putText(img, text_dia, (cx - 40, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
-
+        cv2.circle(img, (cx, cy), r_input, (255, 255, 0), 2)       # Cyan
+        #cv2.circle(img, (cx, cy), r_out, (0, 255, 255), 2)     # Vàng
+        
         # 2. TẠO TẤM MASK NỀN XANH PCB (HSV)
         hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
         lower_green = np.array([35, 40, 40])
@@ -302,58 +381,35 @@ class PCBCheckerApp:
         _, edge_map_bw = cv2.threshold(magnitude, 30, 255, cv2.THRESH_BINARY)
         edge_map_display = cv2.cvtColor(edge_map_bw, cv2.COLOR_GRAY2BGR)
         
-        cv2.circle(edge_map_display, (cx, cy), r_in, (255, 255, 0), 1)
+        cv2.circle(edge_map_display, (cx, cy), r_input, (255, 255, 0), 1)
         cv2.circle(edge_map_display, (cx, cy), r_out, (0, 255, 255), 1)
-        cv2.putText(edge_map_display, f"R:{r_in}px", (cx - 40, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+        cv2.putText(edge_map_display, f"R:{r_input}px", (cx - 40, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
         # 4. 6 GÓC ROI CỐ ĐỊNH
         #FIXED_ANGLES = [-35, 40, 90, 145, 210, 270] 
         # --- BƯỚC NÂNG CẤP CÔNG NGHIỆP: TỰ ĐỘNG TÌM GÓC XOAY CONNECTOR ---
         BASE_ANGLES = [0, 60, 120, 180, 240, 300] # Mảng góc mốc chuẩn 360/6
         
-        # 1. Quét toàn bộ 360 độ để tìm Tai Mốc (Tai có vươn cạnh rõ nhất)
-        scan_step = 2 # Quét mỗi 2 độ một tia
-        max_edge_r = 0
-        found_key_angle = 0
-
-        for a in range(0, 360, scan_step):
-            rad = math.radians(a)
-            cos_a, sin_a = math.cos(rad), math.sin(rad)
-            
-            # Quét từ r_in ra r_out tìm điểm cạnh Sobel
-            for r in range(r_in + 10, r_out - 2):
-                px = int(cx + r * cos_a)
-                py = int(cy + r * sin_a)
-                if 0 <= px < img.shape[1] and 0 <= py < img.shape[0]:
-                    if magnitude[py, px] > 30: # Ngưỡng cạnh rõ
-                        if r > max_edge_r:
-                            max_edge_r = r
-                            found_key_angle = a # Lưu lại góc của tai mốc tìm thấy
-
-        # 2. Tính góc lệch Delta so với mốc 0 độ (hoặc góc mốc gần nhất)
-        # Nắn góc lệch về khoảng [-30, 30] độ quanh vạch chuẩn gần nhất
-        nearest_base = min(BASE_ANGLES, key=lambda x: abs((found_key_angle - x + 180) % 360 - 180))
-        angle_offset = (found_key_angle - nearest_base + 180) % 360 - 180
 
         # 3. Tạo mảng FIXED_ANGLES ĐỘNG thích ứng với góc xoay thực tế của Connector
         DYNAMIC_FIXED_ANGLES = [(ang + angle_offset) for ang in BASE_ANGLES]
 
-        sector_angle = 20 # góc quét là 30 vừa đủ chứa tai
+        sector_angle = 12 # góc quét là sector_angle*2 vừa đủ chứa tai
 
         distances = []
         ear_crop_images = []
         ear_data_draw = []
 
         for mid_angle in DYNAMIC_FIXED_ANGLES:
-            a_start = mid_angle - sector_angle / 2
-            a_end = mid_angle + sector_angle / 2
+            a_start = mid_angle - sector_angle
+            a_end = mid_angle + sector_angle
             # 1. QUÉT CÁC TIA: LẤY TẤT CẢ ĐIỂM CẠNH THỎA MÃN (KHÔNG DÙNG argmax NỮA)
             valid_edge_points = []
-            for angle in np.linspace(a_start, a_end, 60):
+            for angle in np.linspace(a_start, a_end, 30):
                 rad = math.radians(angle)
                 cos_a, sin_a = math.cos(rad), math.sin(rad)
-
-                for r in range(r_in + 8, r_out - 3):
+            
+                for r in range(r_input1, r_out):# 1.12 LÀ BẰNG 75% MIN( lỌC NHIỄU ) for r in range(r_input + 15, r_out - 3):
                     px = int(cx + r * cos_a)
                     py = int(cy + r * sin_a)
                     if 0 <= px < img.shape[1] and 0 <= py < img.shape[0]:
@@ -364,7 +420,7 @@ class PCBCheckerApp:
                             if angle_diff > 90: angle_diff = 180 - angle_diff
 
                             # Lọc đúng cạnh tiếp tuyến
-                            if angle_diff < 10:
+                            if angle_diff < 18:# chọn số ngẫu nhiên
                                 valid_edge_points.append((px, py, r, cos_a, sin_a))
 
             # 2. PHÂN NHÓM THEO BÁN KÍNH VÀ CHỌN ĐOẠN CẠNH DÀI NHẤT (NẰM Ở NGOÀI)
@@ -411,18 +467,19 @@ class PCBCheckerApp:
                     mid_idx = len(best_cluster) // 2
                     px, py, r_found, cos_a, sin_a = best_cluster[mid_idx]
 
-                    best_dist_for_ear = r_found - r_in
-                    best_p_start = (int(cx + r_in * cos_a), int(cy + r_in * sin_a))
+                    best_dist_for_ear = r_found - r_input
+                    best_p_start = (int(cx + r_input * cos_a), int(cy + r_input * sin_a))
                     best_p_end = (px, py)
+
                     # Bây giờ vẽ lên inspect_frame thoải mái không sợ lỗi!
-                    cv2.line(img, p_first, p_last, (0, 0, 255), 2, cv2.LINE_AA)
+                    # cv2.line(img, p_first, p_last, (0, 0, 255), 2, cv2.LINE_AA)
                     cv2.line(edge_map_display, p_first, p_last, (0, 255, 0), 2)
             distances.append(best_dist_for_ear)
             ear_data_draw.append((best_p_start, best_p_end))
 
             rad_m = math.radians(mid_angle)
-            rx = int(cx + (r_in + ear_max_height / 2) * math.cos(rad_m))
-            ry = int(cy + (r_in + ear_max_height / 2) * math.sin(rad_m))
+            rx = int(cx + (r_input + ear_max_height / 2) * math.cos(rad_m))
+            ry = int(cy + (r_input + ear_max_height / 2) * math.sin(rad_m))
             crop_size = 130
             x1, x2 = max(0, rx - crop_size), min(img.shape[1], rx + crop_size)
             y1, y2 = max(0, ry - crop_size), min(img.shape[0], ry + crop_size)
@@ -437,7 +494,7 @@ class PCBCheckerApp:
             dist = distances[i]
             p_start, p_end = ear_data_draw[i]
 
-            if dist <= 60 or dist < 0.80 * max_d:
+            if dist <= 60 or dist < 0.70 * max_d:
                 color = (0, 0, 255)
                 status = "NG"
                 is_ng = True
@@ -445,9 +502,9 @@ class PCBCheckerApp:
                 color = (0, 255, 0)
                 status = "OK"
 
-            if dist > 0:
-                cv2.arrowedLine(img, p_start, p_end, color, 2, tipLength=0.25)
-                cv2.circle(img, p_end, 3, (0, 0, 255), -1)
+            # if dist > 0:
+            #     cv2.arrowedLine(img, p_start, p_end, color, 2, tipLength=0.25)
+            #     cv2.circle(img, p_end, 3, (0, 0, 255), -1)
 
             ear_data.append((ear_crop_images[i], f"{dist}px", status, color))
 
@@ -458,15 +515,30 @@ class PCBCheckerApp:
         """
         Kích hoạt kiểm tra: Chụp 10 frame liên tiếp -> Lấy trung bình kích thước 6 tai -> Hiển thị
         """
+        
         if self.cap is None or not self.cap.isOpened():
             messagebox.showwarning("Cảnh báo", "Camera chưa được kết nối!")
             return
-
         # Vô hiệu hóa nút bấm tạm thời để người dùng không bấm dồn dập
         self.btn_inspect.config(state="disabled", text="⏳ ĐANG TÍNH TOÁN GIÁ TRỊ ...")
-        self.root.update()
+        self.lbl_result.config(text="CHEKING... ", fg="green")
+        # 2. XÓA MÀN HÌNH CŨ -> ĐƯA VỀ NỀN XANH GEMINI (BGR: 30, 20, 15)
+        gemini_bg_bgr = (245, 230, 195)
+        blank_canvas = np.full((900, 900, 3), gemini_bg_bgr, dtype=np.uint8)
+        blank_pil = Image.fromarray(cv2.cvtColor(blank_canvas, cv2.COLOR_BGR2RGB))
+        blank_tk = ImageTk.PhotoImage(blank_pil)
 
-        NUM_SAMPLES = 5
+        self.lbl_full_result.config(image=blank_tk)
+        self.lbl_full_result.image = blank_tk
+        # 3. Ép Tkinter cập nhật giao diện ngay lập tức
+        self.root.update()
+        avg_cx, avg_cy, avg_r_in, avg_angle_offset, last_frame = self.detect_connector_pose()
+        if avg_cx is None or last_frame is None:
+            messagebox.showwarning("Cảnh báo", "Không tìm thấy Connector!")
+            self.lbl_result.config(text="NOT CONECTOR", fg="red")
+            # Mở lại nút bấm sau khi chụp xong
+            self.btn_inspect.config(state="normal", text="🔍 KIỂM TRA CONNECTOR")
+            return
         all_distances = [[] for _ in range(6)] # Mảng lưu 10 khoảng cách của 6 tai
         last_clean_frame = None
 
@@ -479,7 +551,7 @@ class PCBCheckerApp:
             last_clean_frame = frame.copy()
 
             # Chạy thuật toán xử lý ảnh trên frame hiện tại
-            processed_img, edge_img, status, ear_data = self.process_image(frame)
+            processed_img, edge_img, status, ear_data = self.process_image(frame,cx=avg_cx,cy=avg_cy,r_input=avg_r_in,angle_offset=avg_angle_offset)
 
             # Lấy khoảng cách (px) từng tai từ ear_data
             for i in range(6):
@@ -490,7 +562,6 @@ class PCBCheckerApp:
                         all_distances[i].append(dist_val)
                     except ValueError:
                         all_distances[i].append(0.0)
-
             # Chờ 10ms để camera quét frame mới
             cv2.waitKey(10)
 
@@ -516,7 +587,7 @@ class PCBCheckerApp:
             avg_distances.append(final_px)
 
         # 3. CHẠY LẠI PROCESS_IMAGE TRÊN LAST_FRAME ĐỂ LẤY VỊ TRÍ TỌA ĐỘ VẼ
-        processed_img, edge_img, status, ear_data = self.process_image(last_clean_frame)
+        processed_img, edge_img, status, ear_data = self.process_image(last_clean_frame,avg_cx,cy=avg_cy,r_input=avg_r_in,angle_offset=avg_angle_offset)
 
         if processed_img is None:
             return
@@ -529,9 +600,9 @@ class PCBCheckerApp:
         for i in range(6):
             avg_d = avg_distances[i]
             crop_img, _, _, _ = ear_data[i] if i < len(ear_data) else (None, "", "", (0,0,0))
-
+            avg_r_in
             # Điều kiện đánh giá OK/NG dựa trên trung bình
-            if avg_d <= 60 or avg_d < 0.80 * max_avg_d:
+            if (avg_d <= (avg_r_in*4/21)) or avg_d < 0.70 * max_avg_d:
                 color = (0, 0, 255) # Đỏ
                 ear_status = "NG"
                 is_ng = True
@@ -548,32 +619,18 @@ class PCBCheckerApp:
             self.lbl_result.config(text="RESULT: OK ", fg="green")
 
         # 5. CẮT VÙNG PHÓNG TO CONNECTOR VÀ HIỂN THỊ LÊN UI (GIỮ NGUYÊN CODE CỦA BẠN)
-        gray = cv2.cvtColor(processed_img, cv2.COLOR_BGR2GRAY)
         h_img, w_img = processed_img.shape[:2]
+        crop_margin = 450
+        # Ép kiểu tâm sang số nguyên int
+        cx_int, cy_int = int(avg_cx), int(avg_cy)
 
-        circles = cv2.HoughCircles(
-            cv2.GaussianBlur(gray, (5, 5), 0), cv2.HOUGH_GRADIENT, 
-            dp=1.2, minDist=int(min(h_img, w_img) * 0.15), 
-            param1=100, param2=25, 
-            minRadius=int(min(h_img, w_img) * 0.10), 
-            maxRadius=int(min(h_img, w_img) * 0.25)
-        )
+        margin =int(crop_margin)
+        x1, x2 = max(0, cx_int - margin), min(w_img, cx_int + margin)
+        y1, y2 = max(0, cy_int - margin), min(h_img, cy_int + margin)
 
-        if circles is not None:
-            circles = np.uint16(np.around(circles))
-            cx, cy, r = circles[0][0]
-            crop_margin = 520
-            cy_int, cx_int, margin = int(cy), int(cx), int(crop_margin)
-            x1, x2 = max(0, cx_int - margin), min(w_img, cx_int + margin)
-            y1, y2 = max(0, cy_int - margin), min(h_img, cy_int + margin)
-
-            main_crop = processed_img[y1:y2, x1:x2]
-            edge_crop = edge_img[y1:y2, x1:x2] if edge_img is not None else None
-        else:
-            main_crop = processed_img
-            edge_crop = edge_img
-
-        display_size = (520, 520)
+        main_crop = processed_img[y1:y2, x1:x2]
+        edge_crop = edge_img[y1:y2, x1:x2] if edge_img is not None else None
+        display_size = (500, 500)
 
         if main_crop is None or main_crop.size == 0:
             print("[WARNING] Ảnh main_crop bị rỗng! Bỏ qua frame này.")
@@ -594,19 +651,151 @@ class PCBCheckerApp:
             self.panel_edge.config(image=edge_tk)
             self.panel_edge.image = edge_tk
 
-        # 6. CẬP NHẬT 6 ẢNH TAI NHỎ VỚI GIÁ TRỊ TRUNG BÌNH VỪA TÍNH
-        for i, (crop_img, avg_area_str, ear_status, color) in enumerate(final_ear_data):
-            if crop_img is not None and crop_img.size > 0:
-                crop_rgb = cv2.cvtColor(crop_img, cv2.COLOR_BGR2RGB)
-                crop_pil = Image.fromarray(crop_rgb).resize((230, 230), Image.Resampling.LANCZOS)
-                crop_tk = ImageTk.PhotoImage(crop_pil)
 
-                self.ear_panels[i].config(image=crop_tk)
-                self.ear_panels[i].image = crop_tk
+        full_result_img = last_clean_frame
 
-                fg_color = "red" if ear_status == "NG" else "green"
-                self.ear_labels[i].config(text=f"Tai {i+1}: {avg_area_str} ({ear_status})", fg=fg_color)
+        if full_result_img is not None and full_result_img.size > 0:
+            # --- 1. VẼ THÔNG SỐ 6 TAI LÊN ẢNH GỐC TẠI TỌA ĐỘ CỰC ---
+            if 'avg_cx' in locals() and 'avg_cy' in locals() and 'avg_r_in' in locals():
+                # Danh sách 6 góc tương ứng với 6 tai (thay bằng biến góc thực tế nếu có avg_angle_offset)
+                BASE_ANGLES2 = [0, 60, 120, 180, 240, 300]
+                DYNAMIC_FIXED_ANGLES2 = [(ang + avg_angle_offset) for ang in BASE_ANGLES2]
+                # Bán kính đặt chữ (nằm sát phía ngoài viền tai)
+                R_text = int(avg_r_in - 45)
 
+                for i, (crop_img, avg_area_str, ear_status, color) in enumerate(final_ear_data):
+                    # Tính chuyển đổi px -> um (chia 2)
+                    try:
+                        val_px = float(str(avg_area_str).replace("px", "").strip())
+                        val_um = val_px*1.575/avg_r_in;
+                        if(val_um>0):
+                            display_val = f"{val_um:.3f} mm"
+                        else:    
+                            display_val = f"Không tìm thấy..."
+                    except ValueError:
+                        display_val = f"Không tìm thấy..."
+                    if(val_px>0):
+                        # Xác định chuỗi hiển thị và màu sắc (BGR: Xanh lá cho OK, Đỏ cho NG)
+                        text_str = f"{display_val} ({ear_status})"
+                    else:
+                        text_str = f"{display_val}"
+                    bgr_color = (0, 0, 255) if ear_status == "NG" else (0, 255, 0)
+
+                    # Tính tọa độ (x, y) của từng tai trên ảnh full
+                    angle_deg = DYNAMIC_FIXED_ANGLES2[i]
+                    rad = math.radians(-angle_deg)
+                    
+                    # Trừ sin do trục Y của OpenCV hướng xuống
+                    cx_ear = int(avg_cx + R_text * math.cos(rad))
+                    cy_ear = int(avg_cy - R_text * math.sin(rad))
+
+                    # Dịch tâm chữ một chút để căn giữa văn bản
+                    (t_w, t_h), _ = cv2.getTextSize(text_str, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)
+                    text_x = int(cx_ear - t_w / 2)
+                    text_y = int(cy_ear + t_h / 2)
+
+                    # Vẽ chữ OK/NG và giá trị um lên ảnh gốc
+                    cv2.putText(
+                        full_result_img,
+                        text_str,
+                        (text_x, text_y),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5,
+                        bgr_color,
+                        2,
+                        cv2.LINE_AA
+                    )
+                    # VẼ ĐƯỜNG VẠCH MÀU ĐỎ 25PX VUÔNG GÓC VỚI TIA QUÉT (TẠI ĐỈNH MÉP TAI)
+                    # -------------------------------------------------------------
+                    # 1. Tọa độ đỉnh mép tai (bán kính R_in + val_px)
+                    if(val_px>0):
+                        r_outer = avg_r_in + val_px
+                        x_top = avg_cx + r_outer * math.cos(rad)
+                        y_top = avg_cy - r_outer * math.sin(rad)
+
+                        # 2. Vector vuông góc với tia quét tại đỉnh mép tai
+                        perp_rad = rad + math.pi / 2.0
+
+                        # 3. Tọa độ 2 đầu đoạn thẳng 25px ôm theo mép tai
+                        x_perp1 = int(x_top + 25 * math.cos(perp_rad))
+                        y_perp1 = int(y_top - 25 * math.sin(perp_rad))
+
+                        x_perp2 = int(x_top - 25 * math.cos(perp_rad))
+                        y_perp2 = int(y_top + 25 * math.sin(perp_rad))
+
+                        # 4. Vẽ đường vạch màu đỏ nằm trên mép tai
+                        cv2.line(
+                            full_result_img,
+                            (x_perp1, y_perp1),
+                            (x_perp2, y_perp2),
+                            (0, 0, 255),  # Màu đỏ (BGR)
+                            2,            # Độ dày nét vẽ
+                            cv2.LINE_AA
+                        )
+                    # -------------------------------------------------------------
+                    # A. TỌA ĐỘ TÂM ĐIỂM TAI (ĐỈNH MÉP TAI)
+                    # -------------------------------------------------------------
+                    BOX_HALF_SIZE = 100
+                    r_outer = avg_r_in-10
+                    x_ear_top = int(avg_cx + r_outer * math.cos(rad))
+                    y_ear_top = int(avg_cy - r_outer * math.sin(rad))
+
+                    # -------------------------------------------------------------
+                    # B. VẼ Ô VUÔNG CÓ TÂM TRÙNG VỚI ĐIỂM TAI (X_EAR_TOP, Y_EAR_TOP)
+                    # -------------------------------------------------------------
+                    box_x1 = x_ear_top - BOX_HALF_SIZE
+                    box_y1 = y_ear_top - BOX_HALF_SIZE
+                    box_x2 = x_ear_top + BOX_HALF_SIZE
+                    box_y2 = y_ear_top + BOX_HALF_SIZE
+
+                    # Vẽ ô vuông màu theo trạng thái OK/NG
+                    cv2.rectangle(
+                        full_result_img,
+                        (box_x1, box_y1),
+                        (box_x2, box_y2),
+                        bgr_color,
+                        2
+                    )
+                # --- 2. CẮT VÙNG CONNECTOR THEO TÂM VÀ BÁN KÍNH ---
+                R_crop = int(avg_r_in + 110)
+                h_img, w_img = full_result_img.shape[:2]
+
+                x1 = max(0, int(avg_cx - R_crop))
+                y1 = max(0, int(avg_cy - R_crop))
+                x2 = min(w_img, int(avg_cx + R_crop))
+                y2 = min(h_img, int(avg_cy + R_crop))
+
+                crop_img = full_result_img[y1:y2, x1:x2]
+            else:
+                crop_img = full_result_img
+
+            # --- 3. ĐỆM CANVAS NỀN ĐEN ĐỂ HIỂN THỊ CHỐNG GIẬT KHUNG (SIZE 900x900) ---
+            target_w, target_h = 900, 900
+            ch, cw = crop_img.shape[:2]
+            
+            # Tính tỉ lệ resize giữ nguyên dáng Connector
+            scale = min(target_w / cw, target_h / ch)
+            new_w, new_h = int(cw * scale), int(ch * scale)
+            resized_crop = cv2.resize(crop_img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+            # Đặt hình vuông vừa vặn vào giữa frame 900x900
+            # Tạo nền màu xanh Gemini thay vì np.zeros (nền đen)
+            GEMINI_BG = (245, 230, 195) # BGR cho tone xanh đen mờ / Gemini Dark
+            canvas = np.full((target_h, target_w, 3), GEMINI_BG, dtype=np.uint8)
+            off_x = (target_w - new_w) // 2
+            off_y = (target_h - new_h) // 2
+            canvas[off_y:off_y + new_h, off_x:off_x + new_w] = resized_crop
+
+            # --- 4. CHUYỂN ĐỔI VÀ ĐƯA LÊN TKINTER ---
+            img_rgb = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB)
+            img_pil = Image.fromarray(img_rgb)
+            img_tk = ImageTk.PhotoImage(img_pil)
+
+            self.lbl_full_result.config(image=img_tk)
+            self.lbl_full_result.image = img_tk
+        else:
+            print("[WARNING] full_result_img bị None hoặc rỗng, không thể hiển thị!")
+        return ear_status
     def __del__(self):
         if self.cap is not None and self.cap.isOpened():
             self.cap.release()
