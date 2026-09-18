@@ -5,7 +5,10 @@ import tkinter as tk
 from tkinter import messagebox
 from PIL import Image, ImageTk
 import gc  # Thêm thư viện dọn rác ở đầu file: import gc
-NUM_SAMPLES = 3
+import threading
+import time
+NUM_SAMPLES = 6
+NUM_SAMPLES_detect=3
 def get_best_camera_index():
     # Thử kiểm tra Camera 1 trước (thường là Cam USB cắm ngoài)
     cap1 = cv2.VideoCapture(1, cv2.CAP_DSHOW)
@@ -15,6 +18,29 @@ def get_best_camera_index():
     
     # Nếu không có Cam 1 thì quay về Cam 0 (Webcam có sẵn trên máy)
     return 0
+class CameraStream:
+    def __init__(self, src=0):
+        self.cap = cv2.VideoCapture(src, cv2.CAP_DSHOW) # DSHOW giúp mở cam chuẩn trên Windows
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        self.ret, self.frame = self.cap.read()
+        self.running = True
+        
+        # Chạy luồng đọc ảnh ngầm
+        self.thread = threading.Thread(target=self.update, daemon=True)
+        self.thread.start()
+
+    def update(self):
+        while self.running:
+            if self.cap.isOpened():
+                self.ret, self.frame = self.cap.read()
+            time.sleep(0.01) # Nghỉ nhẹ 10ms để giảm tải CPU
+
+    def get_frame(self):
+        return self.ret, self.frame
+
+    def stop(self):
+        self.running = False
+        self.cap.release()
 class PCBCheckerApp:
     def __init__(self, root):
         self.root = root
@@ -32,15 +58,16 @@ class PCBCheckerApp:
         self.total_count = 0
         self.ok_count = 0
         self.ng_count = 0
-
-        # Lúc khởi tạo camera trong ứng dụng:
-        cam_index = get_best_camera_index()
-        self.cap = cv2.VideoCapture(cam_index, cv2.CAP_DSHOW)
-        # Cài đặt camera về độ phân giải Full HD (1920x1080) hoặc HD (1280x720)
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
-        if not self.cap.isOpened():
-            messagebox.showerror("Lỗi Camera", "Không thể mở kết nối tới Camera!")
+        self.init_camera
+        # # Lúc khởi tạo camera trong ứng dụng:
+        # cam_index = get_best_camera_index()
+        # self.cap = cv2.VideoCapture(cam_index, cv2.CAP_DSHOW)
+        # # Cài đặt camera về độ phân giải Full HD (1920x1080) hoặc HD (1280x720)
+        # self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+        # self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+        
+        # if not self.cap.isOpened():
+        #     messagebox.showerror("Lỗi Camera", "Không thể mở kết nối tới Camera!")
 
         # --- FRAME ĐIỀU KHIỂN TOP ---
         top_frame = tk.Frame(root)
@@ -164,6 +191,17 @@ class PCBCheckerApp:
         if self.cap.isOpened():
             self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+            self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
+            # Khóa giá trị Phơi sáng cố định (Chỉnh số này tùy theo độ sáng môi trường)
+            self.cap.set(cv2.CAP_PROP_EXPOSURE, -6) 
+
+            # Tắt Tự động Cân bằng trắng (Auto White Balance)
+            if hasattr(cv2, 'CAP_PROP_AUTO_WB'):
+                self.cap.set(cv2.CAP_PROP_AUTO_WB, 0)
+            self.cap.set(cv2.CAP_PROP_AUTOFOCUS, 0) # Tắt Auto Focus nếu có
+            # Chỉ cho phép bộ đệm lưu tối đa 1 frame
+            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
             self.is_camera_connected = True
             print("[OK] Đã kết nối thành công Camera!")
             self.lbl_result.config(text="KẾT QUẢ: ĐANG LIVE CAMERA", fg="gray")
@@ -172,7 +210,7 @@ class PCBCheckerApp:
             print("[WARNING] Không thể kết nối Camera. Đang đợi cắm lại...")
 
     def update_video_stream(self):
-        next_delay = 30  # Chờ 3s trước khi thử lại
+        next_delay = 34  # ĐÚNG 33ms (~30 FPS)
         """Hiển thị luồng Live View giữ nguyên tỷ lệ camera (480x360 hoặc 640x480)"""
         if self.cap is not None and self.cap.isOpened():
             ret, frame = self.cap.read()    
@@ -199,13 +237,14 @@ class PCBCheckerApp:
             # Hiển thị màn hình đen thông báo mất kết nối
             next_delay = 2000
             self.handle_camera_loss()
-        self.root.after(next_delay, self.update_video_stream)
         # Ép Python dọn dẹp bộ nhớ rác định kỳ
         if not hasattr(self, 'frame_count'):
             self.frame_count = 0
         self.frame_count += 1
         if self.frame_count % 500 == 0:  # Cứ 100 frames dọn RAM 1 lần
             gc.collect()
+        self.root.after(next_delay, self.update_video_stream)
+
     def handle_camera_loss(self):
         """Xử lý giao diện khi mất kết nối Camera: Xóa ảnh cũ, hiển thị màn hình đen"""
         self.is_camera_connected = False
@@ -258,7 +297,7 @@ class PCBCheckerApp:
         BASE_SET_0  = [0, 60, 120, 180, 240, 300]   # Trường hợp 1: Hệ 0 độ
         BASE_SET_30 = [30, 90, 150, 210, 270, 330] # Trường hợp 2: Hệ 30 độ
 
-        for _ in range(NUM_SAMPLES):
+        for _ in range(NUM_SAMPLES_detect):
             ret, frame = self.cap.read()
             if not ret or frame is None:
                 continue
@@ -328,9 +367,6 @@ class PCBCheckerApp:
                 list_sin.append(math.sin(rad_offset))
                 list_cos.append(math.cos(rad_offset))
                             # Chờ 10ms để camera quét frame mới
-                cv2.waitKey(10)
-                self.root.update()
-
         # --- TÍNH GIÁ TRỊ TRUNG BÌNH CỦA CÁC FRAMES ---
         if len(list_cx) == 0:
             print("[WARNING] Không tìm thấy Connector!")
@@ -350,7 +386,7 @@ class PCBCheckerApp:
 
         return avg_cx, avg_cy, avg_r_in, avg_angle_offset, last_frame
     
-    def process_image(self, img,cx=None, cy=None, angle_offset=0.0,r_input=None):
+    def process_image(self, img,cx=None, cy=None,r_input=None, angle_offset=0.0):
         """Giữ nguyên 100% Thuật toán gốc của bạn"""
         if img is None or cx is None or cy is None or r_input is None:
             return None, None, "Không có dữ liệu ảnh!", []
@@ -361,7 +397,6 @@ class PCBCheckerApp:
         blurred = cv2.GaussianBlur(gray, (3, 3), 0)
         ear_max_height = 100 
         r_out = int(r_input*1.4)
-
         # Vẽ vòng Cyan và vòng Vàng
         cv2.circle(img, (cx, cy), r_input, (255, 255, 0), 2)       # Cyan
         #cv2.circle(img, (cx, cy), r_out, (0, 255, 255), 2)     # Vàng
@@ -395,7 +430,7 @@ class PCBCheckerApp:
         DYNAMIC_FIXED_ANGLES = [(ang + angle_offset) for ang in BASE_ANGLES]
 
         sector_angle = 12 # góc quét là sector_angle*2 vừa đủ chứa tai
-
+        valid_edge_points_min=int((r_input/24))
         distances = []
         ear_crop_images = []
         ear_data_draw = []
@@ -427,8 +462,8 @@ class PCBCheckerApp:
             best_dist_for_ear = 0
             best_p_start, best_p_end = (cx, cy), (cx, cy)
 
-            if len(valid_edge_points) >= 15:
-                # Gom nhóm các điểm có bán kính r gần nhau (sai số 3px)
+            if len(valid_edge_points) >= 13:#(12 độ * 2pi*rin*20%/360 độ)
+                # Gom nhóm các điểm có bán kính r gần nhau (sai số 5px)
                 from collections import defaultdict
                 clusters = defaultdict(list)
 
@@ -492,9 +527,7 @@ class PCBCheckerApp:
 
         for i in range(6):
             dist = distances[i]
-            p_start, p_end = ear_data_draw[i]
-
-            if dist <= 60 or dist < 0.70 * max_d:
+            if dist <= (r_input*4/21) or dist < 0.70 * max_d:
                 color = (0, 0, 255)
                 status = "NG"
                 is_ng = True
@@ -502,13 +535,9 @@ class PCBCheckerApp:
                 color = (0, 255, 0)
                 status = "OK"
 
-            # if dist > 0:
-            #     cv2.arrowedLine(img, p_start, p_end, color, 2, tipLength=0.25)
-            #     cv2.circle(img, p_end, 3, (0, 0, 255), -1)
-
             ear_data.append((ear_crop_images[i], f"{dist}px", status, color))
 
-        status_text = "RESULT: NOT GOOD (NG)" if is_ng else "RESULT: OK"
+        status_text = "NG" if is_ng else "OK"
         return img, edge_map_display, status_text, ear_data
 
     def inspect_current_frame(self):
@@ -520,7 +549,7 @@ class PCBCheckerApp:
             messagebox.showwarning("Cảnh báo", "Camera chưa được kết nối!")
             return
         # Vô hiệu hóa nút bấm tạm thời để người dùng không bấm dồn dập
-        self.btn_inspect.config(state="disabled", text="⏳ ĐANG TÍNH TOÁN GIÁ TRỊ ...")
+        self.btn_inspect.config(state="disabled", text="⏳ ĐANG KIỂM TRA CONECTOR...")
         self.lbl_result.config(text="CHEKING... ", fg="green")
         # 2. XÓA MÀN HÌNH CŨ -> ĐƯA VỀ NỀN XANH GEMINI (BGR: 30, 20, 15)
         gemini_bg_bgr = (245, 230, 195)
@@ -541,7 +570,7 @@ class PCBCheckerApp:
             return
         all_distances = [[] for _ in range(6)] # Mảng lưu 10 khoảng cách của 6 tai
         last_clean_frame = None
-
+        status_list = []
         # 1. BẮT ĐẦU VÒNG LẶP CHỤP 10 FRAMES LIÊN TIẾP
         for sample_idx in range(NUM_SAMPLES):
             ret, frame = self.cap.read()
@@ -552,7 +581,7 @@ class PCBCheckerApp:
 
             # Chạy thuật toán xử lý ảnh trên frame hiện tại
             processed_img, edge_img, status, ear_data = self.process_image(frame,cx=avg_cx,cy=avg_cy,r_input=avg_r_in,angle_offset=avg_angle_offset)
-
+            status_list.append(status)
             # Lấy khoảng cách (px) từng tai từ ear_data
             for i in range(6):
                 if i < len(ear_data):
@@ -562,9 +591,7 @@ class PCBCheckerApp:
                         all_distances[i].append(dist_val)
                     except ValueError:
                         all_distances[i].append(0.0)
-            # Chờ 10ms để camera quét frame mới
-            cv2.waitKey(10)
-
+        ok_count = status_list.count("OK")
         # Mở lại nút bấm sau khi chụp xong
         self.btn_inspect.config(state="normal", text="🔍 KIỂM TRA CONNECTOR")
 
@@ -587,7 +614,7 @@ class PCBCheckerApp:
             avg_distances.append(final_px)
 
         # 3. CHẠY LẠI PROCESS_IMAGE TRÊN LAST_FRAME ĐỂ LẤY VỊ TRÍ TỌA ĐỘ VẼ
-        processed_img, edge_img, status, ear_data = self.process_image(last_clean_frame,avg_cx,cy=avg_cy,r_input=avg_r_in,angle_offset=avg_angle_offset)
+        processed_img, edge_img, status, ear_data = self.process_image(last_clean_frame,cx=avg_cx,cy=avg_cy,r_input=avg_r_in,angle_offset=avg_angle_offset)#cx=avg_cx,cy=avg_cy,
 
         if processed_img is None:
             return
@@ -595,14 +622,19 @@ class PCBCheckerApp:
         # 4. ĐÁNH GIÁ LẠI TRẠNG THÁI OK/NG DỰA TRÊN KHOẢNG CÁCH TRUNG BÌNH
         max_avg_d = max(avg_distances) if max(avg_distances) > 0 else 1.0
         is_ng = False
+        is_ng_count = False
         final_ear_data = []
-
+        ok_percentage = int((ok_count / NUM_SAMPLES) * 100)
+        if ok_percentage > 10:
+            is_ng_count=False
+        else:
+            is_ng_count = True
         for i in range(6):
             avg_d = avg_distances[i]
             crop_img, _, _, _ = ear_data[i] if i < len(ear_data) else (None, "", "", (0,0,0))
             avg_r_in
             # Điều kiện đánh giá OK/NG dựa trên trung bình
-            if (avg_d <= (avg_r_in*4/21)) or avg_d < 0.70 * max_avg_d:
+            if (avg_d <= (avg_r_in*4/21)) or avg_d < 0.65 * max_avg_d:
                 color = (0, 0, 255) # Đỏ
                 ear_status = "NG"
                 is_ng = True
@@ -611,9 +643,8 @@ class PCBCheckerApp:
                 ear_status = "OK"
 
             final_ear_data.append((crop_img, f"{avg_d}px", ear_status, color))
-
         # Cập nhật nhãn kết quả chung
-        if is_ng:
+        if is_ng and is_ng_count:
             self.lbl_result.config(text="RESULT: NOT GOOD (NG) ", fg="red")
         else:
             self.lbl_result.config(text="RESULT: OK ", fg="green")
@@ -756,9 +787,31 @@ class PCBCheckerApp:
                         bgr_color,
                         2
                     )
+
                 # --- 2. CẮT VÙNG CONNECTOR THEO TÂM VÀ BÁN KÍNH ---
                 R_crop = int(avg_r_in + 110)
                 h_img, w_img = full_result_img.shape[:2]
+
+                # # 1. Tính tỉ lệ % OK từ danh sách kết quả hoặc số lần đếm
+                # text = f"OK: {ok_percentage:.1f}%"
+                # # 3. Chọn font chữ và độ phóng đại (scale)
+                # font = cv2.FONT_HERSHEY_SIMPLEX
+                # font_scale = 1.0        # Độ lớn của chữ (tùy chỉnh nếu muốn to/nhỏ hơn)
+                # thickness = 1           # Độ dày nét chữ
+                # # 4. Tính toán kích thước khối chữ để canh giữa chính xác
+                # (text_w, text_h), baseline = cv2.getTextSize(text, font, font_scale, thickness)
+
+                # # Tọa độ góc dưới bên trái của chữ để chữ nằm đúng CHÍNH GIỮA TÂM
+                # text_x = int((w_img - text_w) / 2)
+                # text_y = int((h_img + text_h) / 2)
+
+                # # 5. Vẽ viền đen xung quanh chữ (giúp chữ nổi bật trên mọi nền ảnh)
+                # cv2.putText(processed_img, text, (text_x, text_y), font, font_scale, (0, 0, 0), thickness + 4, cv2.LINE_AA)
+
+                # # 6. Vẽ chữ màu XANH LÁ (nếu Đạt) hoặc ĐỎ (nếu NG) lên giữa ảnh
+                # color = (0, 255, 0) if ok_percentage >= 50 else (0, 0, 255) # BGR
+                # cv2.putText(processed_img, text, (text_x, text_y), font, font_scale, color, thickness, cv2.LINE_AA)               
+
 
                 x1 = max(0, int(avg_cx - R_crop))
                 y1 = max(0, int(avg_cy - R_crop))
