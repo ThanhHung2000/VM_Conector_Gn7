@@ -7,8 +7,47 @@ from PIL import Image, ImageTk
 import gc  # Thêm thư viện dọn rác ở đầu file: import gc
 import threading
 import time
-NUM_SAMPLES = 6
-NUM_SAMPLES_detect=3
+import sys
+import os
+from datetime import datetime
+import json
+from tkinter import simpledialog, messagebox
+CONFIG_FILE = "config.json"
+NUM_SAMPLES = 1
+NUM_SAMPLES_detect=1
+
+# =========================================================================
+# 1. HÀM TỰ ĐỘNG TẠO THƯ MỤC LƯU ẢNH VÀ LOG TẠI VỊ TRÍ FILE .EXE
+# =========================================================================
+def get_exe_dir():
+    """Hàm lấy đường dẫn đến thư mục chứa file .exe (hoặc file .py)"""
+    if getattr(sys, 'frozen', False):
+        # Nếu đã đóng gói thành file .exe
+        return os.path.dirname(sys.executable)
+    else:
+        # Nếu đang chạy trực tiếp bằng file .py
+        return os.path.dirname(os.path.abspath(__file__))
+
+# Lấy đường dẫn gốc
+BASE_DIR = get_exe_dir()
+
+# Tạo sẵn 2 thư mục cố định ngay bên cạnh file .exe
+IMAGE_DIR = os.path.join(BASE_DIR, "Hinh_Anh_Kiem_Tra")
+LOG_DIR = os.path.join(BASE_DIR, "File_Log")
+
+# Tự động tạo thư mục trên máy tính nếu chưa có
+os.makedirs(IMAGE_DIR, exist_ok=True)
+os.makedirs(LOG_DIR, exist_ok=True)
+
+# File log nằm gọn trong thư mục File_Log
+LOG_FILE_PATH = os.path.join(LOG_DIR, "inspection_log.txt")
+def write_log(message):
+    """Hàm ghi log kèm thời gian vào file log"""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log_line = f"[{timestamp}] {message}\n"
+    print(log_line, end="")
+    with open(LOG_FILE_PATH, "a", encoding="utf-8") as f:
+        f.write(log_line)
 def get_best_camera_index():
     # Thử kiểm tra Camera 1 trước (thường là Cam USB cắm ngoài)
     cap1 = cv2.VideoCapture(1, cv2.CAP_DSHOW)
@@ -55,20 +94,20 @@ class PCBCheckerApp:
 
         # Biến quản lý chế độ Auto & Thống kê
         self.is_auto_running = False
-        self.total_count = 0
-        self.ok_count = 0
-        self.ng_count = 0
+        self.total_count = tk.IntVar(value=0)
+        self.ok_count = tk.IntVar(value=0)
+        self.ng_count = tk.IntVar(value=0)
+        self.total_execution_time =0
+        self.total_count_run =0
         self.init_camera
-        # # Lúc khởi tạo camera trong ứng dụng:
-        # cam_index = get_best_camera_index()
-        # self.cap = cv2.VideoCapture(cam_index, cv2.CAP_DSHOW)
-        # # Cài đặt camera về độ phân giải Full HD (1920x1080) hoặc HD (1280x720)
-        # self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
-        # self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
-        
-        # if not self.cap.isOpened():
-        #     messagebox.showerror("Lỗi Camera", "Không thể mở kết nối tới Camera!")
 
+        # --- BIẾN CẤU HÌNH BÁN KÍNH (KHỞI TẠO MẶC ĐỊNH) ---
+        self.center_radius = tk.IntVar(value=300) # Bán kính đường tròn tìm tâm (Pixel)
+        self.number_log = tk.IntVar(value=0) # Bán kính đường tròn tìm tâm (Pixel)
+        self.spec_mm = tk.DoubleVar(value=0.26) # Bán kính đường tròn tìm tâm (Pixel)
+        self.config_magnitude = tk.IntVar(value=30) # Mức ngưỡng - Threshold
+        # Đọc cấu hình từ File nếu có
+        self.load_config()
         # --- FRAME ĐIỀU KHIỂN TOP ---
         top_frame = tk.Frame(root)
         top_frame.pack(fill="x", pady=10)
@@ -83,27 +122,31 @@ class PCBCheckerApp:
             font=("Arial", 12, "bold"), bg="#4CAF50", fg="white", padx=20, pady=5
         )
         self.btn_inspect.pack()
+        # 2. Đăng ký phím Spacebar cho toàn bộ ứng dụng
+        self.root.bind("<space>", self.inspect_current_frame)
+        # Đăng ký sự kiện khi người dùng tắt ứng dụng -> Bắt buộc lưu JSON
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+        # # Nút Bắt đầu Auto
+        #         self.btn_start_auto = tk.Button(
+        #             btn_container, text="▶ BẮT ĐẦU AUTO", command=self.start_auto,
+        #             font=("Arial", 12, "bold"), bg="#2196F3", fg="white", padx=15, pady=5
+        #         )
+        #         self.btn_start_auto.pack(side="left", padx=5)
 
-# Nút Bắt đầu Auto
-        self.btn_start_auto = tk.Button(
-            btn_container, text="▶ BẮT ĐẦU AUTO", command=self.start_auto,
-            font=("Arial", 12, "bold"), bg="#2196F3", fg="white", padx=15, pady=5
-        )
-        self.btn_start_auto.pack(side="left", padx=5)
+        # # Nút Dừng Auto
+        # self.btn_stop_auto = tk.Button(
+        #     btn_container, text="⏹ DỪNG", command=self.stop_auto,
+        #     font=("Arial", 12, "bold"), bg="#f44336", fg="white", padx=15, pady=5, state="disabled"
+        # )
+        # self.btn_stop_auto.pack(side="left", padx=5)
 
-        # Nút Dừng Auto
-        self.btn_stop_auto = tk.Button(
-            btn_container, text="⏹ DỪNG", command=self.stop_auto,
-            font=("Arial", 12, "bold"), bg="#f44336", fg="white", padx=15, pady=5, state="disabled"
-        )
-        self.btn_stop_auto.pack(side="left", padx=5)
-
-        # Nhãn hiển thị thống kê số lần chạy và số lần OK
-        self.lbl_stats = tk.Label(
-            btn_container, text="Số lần chạy: 0 | OK: 0 | NG: 0", 
-            font=("Arial", 11, "bold"), fg="#1976D2", padx=10
-        )
-        self.lbl_stats.pack(side="left", padx=10)
+        # # CẬP NHẬT NHÃN HIỂN THỊ THỐNG KÊ KÈM THỜI GIAN TRUNG BÌNH
+        # self.lbl_stats = tk.Label(
+        #     btn_container, 
+        #     text="Số lần chạy: 0 | OK: 0 | NG: 0 | Thời gian TB: 0 ms", 
+        #     font=("Arial", 11, "bold"), fg="#1976D2", padx=10
+        # )
+        # self.lbl_stats.pack(side="left", padx=10)
 
         self.lbl_result = tk.Label(top_frame, text="KẾT QUẢ: ĐANG LIVE CAMERA", font=("Arial", 13, "bold"), fg="gray")
         self.lbl_result.pack(pady=3)
@@ -119,32 +162,175 @@ class PCBCheckerApp:
 
         # 1. Khung ảnh chính (Live Video / Kết quả)
         left_frame = tk.LabelFrame(left_container, text=" ẢNH KẾT QUẢ ĐO ", font=("Arial", 10, "bold"))
-        left_frame.pack(side="top", fill="y", expand=False, pady=(0, 5))
+        left_frame.pack(side="top", fill="x", expand=False, pady=(0, 5))
 
+        # 2. Thêm khung chứa nút điều khiển phía trên/dưới ảnh
+        top_cam_bar = tk.Frame(left_container)
+        top_cam_bar.pack(fill="y", padx=5, pady=2)
+
+        # Nút bấm Phóng to toàn màn hình
+        self.btn_fullscreen = tk.Button(
+            top_cam_bar, text="⛶ TOÀN MÀN HÌNH", command=self.open_fullscreen_live,
+            font=("Arial", 9, "bold"), bg="#607D8B", fg="white", padx=10
+        )
+        self.btn_fullscreen.pack(side="right")
         self.panel_main = tk.Label(left_frame, bd=1, relief="solid")
         self.panel_main.pack(padx=5, pady=5)
+        # Mẹo: Click đúp vào ảnh cũng sẽ bật Toàn màn hình
+        self.panel_main.bind("<Double-Button-1>", lambda event: self.open_fullscreen_live())
 
+        # Biến quản lý cửa sổ Fullscreen
+        self.fullscreen_window = None
+        self.panel_fullscreen = None
         # 2. Khung ảnh Cạnh Đen Trắng
-        mid_frame = tk.LabelFrame(left_container, text=" BẢN ĐỒ CẠNH ĐEN TRẮNG ", font=("Arial", 10, "bold"))
-        mid_frame.pack(side="bottom", fill="both", expand=True, pady=(5, 0))
+        edge_frame = tk.LabelFrame(left_container, text=" BẢN ĐỒ CẠNH ĐEN TRẮNG ", font=("Arial", 10, "bold"))
+        edge_frame.pack(side="bottom", fill="both", expand=True, pady=(5, 0))
 
-        self.panel_edge = tk.Label(mid_frame, bd=1, relief="solid")
+        self.panel_edge = tk.Label(edge_frame, bd=1, relief="solid")
         self.panel_edge.pack(padx=5, pady=5)
 
         # 3. Khung hiển thị ảnh kết quả tổng (chứa cả 6 nhãn tai)
-        right_frame = tk.LabelFrame(content_frame, text=" CHI TIẾT CONNECTOR ", font=("Arial", 10, "bold"), padx=10, pady=10)
-        right_frame.pack(side="right", fill="both", expand=True, padx=5, pady=5)
+        mid_frame = tk.LabelFrame(content_frame, text=" CHI TIẾT CONNECTOR ", font=("Arial", 10, "bold"), padx=10, pady=10)
+        mid_frame.pack(side="left", fill="both", expand=True, padx=5, pady=5)
 
-        # Lưu lại right_frame để lấy kích thước tự động điều chỉnh ảnh
-        self.right_frame = right_frame 
+        # Lưu lại mid_frame để lấy kích thước tự động điều chỉnh ảnh
+        self.mid_frame = mid_frame 
 
         # Tạo DUY NHẤT 1 Label to để hiển thị bức ảnh kết quả hoàn chỉnh
-        self.lbl_full_result = tk.Label(right_frame)
+        self.lbl_full_result = tk.Label(mid_frame)
         self.lbl_full_result.pack(fill="both", expand=True)
 
-        # Chạy luồng cập nhật video trực tiếp
+        # 4. Khung hiển thị ảnh kết quả tổng (chứa cả 6 nhãn tai)
+        right_frame = tk.LabelFrame(content_frame, text=" THÔNG SỐ HIỂN THỊ ", font=("Arial", 10, "bold"), padx=10, pady=10)
+        right_frame.pack(side="right", fill="y",expand=False, padx=5, pady=5)
+        # 3.2. Khung thống kê tỉ suất & Điều khiển Auto
+        auto_frame = tk.LabelFrame(right_frame, text=" CHẾ ĐỘ AUTO & THỐNG KÊ ", font=("Arial", 10, "bold"), padx=10, pady=10)
+        auto_frame.pack(side="top", fill="x", pady=(5, 0))
+        # Nhãn hiển thị thống kê chi tiết tỉ suất
+
+        self.lbl_total = tk.Label(auto_frame, text=f"Tổng số lần chạy: {self.total_count.get()}", font=("Arial", 9, "bold"), anchor="w")
+        self.lbl_total.pack(fill="x", pady=1)
+
+        self.lbl_ok_ng = tk.Label(auto_frame, text=f"OK: {self.ok_count.get()}  |  NG: {self.ng_count.get()}", font=("Arial", 9, "bold"), fg="#2E7D32", anchor="w")
+        self.lbl_ok_ng.pack(fill="x", pady=1)
+        if(self.total_count.get()):
+            self.lbl_rate = tk.Label(auto_frame, text=f"Tỉ lệ OK (Rate): {(self.ok_count.get() / self.total_count.get()) * 100:.1f}%", font=("Arial", 9, "bold"), fg="#1565C0", anchor="w")
+        else:
+            self.lbl_rate = tk.Label(auto_frame, text="Tỉ lệ OK (Rate): 0%", font=("Arial", 9, "bold"), fg="#1565C0", anchor="w")
+        self.lbl_rate.pack(fill="x", pady=1)
+
+        self.lbl_time = tk.Label(auto_frame, text="Thời gian TB: 0.0 ms", font=("Arial", 9, "bold"), fg="#E65100", anchor="w")
+        self.lbl_time.pack(fill="x", pady=1)
+
+# ==========================================
+        # 3.1. THÔNG SỐ CẤU HÌNH (SPEC & BÁN KÍNH TÂM)
+        # ==========================================
+        cfg_frame = tk.LabelFrame(right_frame, text=" THÔNG SỐ CẤU HÌNH ", font=("Arial", 10, "bold"), padx=10, pady=8)
+        cfg_frame.pack(side="top", fill="x", pady=5)
+
+        # 1. SPEC (mm) - HIỂN THỊ DÒNG 0 (TRƯỚC)
+        tk.Label(cfg_frame, text="Spec (mm):", font=("Arial", 9, "bold"), fg="#D32F2F").grid(row=0, column=0, sticky="w", pady=2)
+        spn_spec = tk.Spinbox(
+            cfg_frame, 
+            from_=0.01, 
+            to=10.0, 
+            increment=0.01, 
+            textvariable=self.spec_mm, 
+            width=8, 
+            font=("Arial", 9, "bold"),
+            format="%.2f"
+        )
+        spn_spec.grid(row=0, column=1, padx=5, pady=2)
+
+        # 2. BÁN KÍNH TÂM (px) - HIỂN THỊ DÒNG 1 (SAU)
+        tk.Label(cfg_frame, text="Bán kính Tâm (px):", font=("Arial", 9)).grid(row=1, column=0, sticky="w", pady=2)
+        spn_center_r = tk.Spinbox(
+            cfg_frame, 
+            from_=1, 
+            to=1000, 
+            textvariable=self.center_radius, 
+            width=8, 
+            font=("Arial", 9, "bold")
+        )
+        spn_center_r.grid(row=1, column=1, padx=5, pady=2)
+        # 3. Mức ngưỡng - Threshold
+        tk.Label(cfg_frame, text="Threshold:", font=("Arial", 9)).grid(row=2, column=0, sticky="w", pady=2)
+        spn_threshold = tk.Spinbox(
+            cfg_frame, 
+            from_=1, 
+            to=255, 
+            textvariable=self.config_magnitude, 
+            width=8, 
+            font=("Arial", 9, "bold")
+        )
+        spn_threshold.grid(row=2, column=1, padx=5, pady=2)
+        # 3. NÚT LƯU CẤU HÌNH - DÒNG 2 (DƯỚI CÙNG KHUNG)
+        self.btn_save_config = tk.Button(
+            cfg_frame, text="💾 LƯU CẤU HÌNH", command=self.save_config,
+            font=("Arial", 9, "bold"), bg="#FF9800", fg="white", padx=10, pady=3
+        )
+        self.btn_save_config.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(5, 0))
+            # Chạy luồng cập nhật video trực tiếp
         self.update_video_stream()
-# --- CÁC HÀM XỬ LÝ CHẾ ĐỘ AUTO ---
+    # --- HÀM LƯU BỘ THÔNG SỐ VÀO FILE CONFIG.JSON ---
+    def save_config(self):
+        ADMIN_PASSWORD = "1"
+        # Hiện hộp thoại hỏi mật khẩu
+        pwd = simpledialog.askstring("Xác thực kỹ sư", "Nhập mật khẩu để lưu cấu hình:", show='*')
+        if pwd == ADMIN_PASSWORD:
+            config_data = {
+                "center_radius": self.center_radius.get(),
+                "spec_mm": self.spec_mm.get(),
+                "config_magnitude ": self.config_magnitude .get(),
+            }
+            try:
+                with open(CONFIG_FILE, "w") as f:
+                    json.dump(config_data, f, indent=4)
+                messagebox.showinfo("Thông báo", "Đã lưu cài đặt cấu hình thành công!")
+            except Exception as e:
+                messagebox.showerror("Lỗi", f"Không thể lưu file cấu hình: {e}")
+        elif pwd is not None: # Nếu nhập sai (và không bấm Cancel)
+            messagebox.showerror("Lỗi mật khẩu", "Mật khẩu không đúng! Bạn không có quyền sửa cấu hình.")
+
+    # --- HÀM ĐỌC BỘ THÔNG SỐ TỪ FILE CONFIG.JSON ---
+    def load_config(self):
+        if os.path.exists(CONFIG_FILE):
+            try:
+                with open(CONFIG_FILE, "r") as f:
+                    config_data = json.load(f)
+                    self.center_radius.set(config_data.get("center_radius", 300))
+                    self.spec_mm.set(config_data.get("spec_mm", 0.3))#spec_mm
+                    self.config_magnitude .set(config_data.get("config_magnitude ", 30))#total_count
+
+                    self.total_count .set(config_data.get("total_count", 0))
+                    self.ok_count .set(config_data.get("ok_count", 0))
+                    self.ng_count .set(config_data.get("ng_count", 0))                  
+            except Exception as e:
+                print(f"Lỗi khi đọc file config: {e}")
+
+        config_data = {
+            "center_radius": self.center_radius.get(),
+            "spec_mm": self.spec_mm.get(),
+            "config_magnitude ": self.config_magnitude .get(),
+            "total_count ": self.total_count.get(),
+            "ok_count ": self.ok_count.get(),
+            "ng_count ": self.ng_count.get()
+        }
+        try:
+            with open(CONFIG_FILE, "w") as f:
+                json.dump(config_data, f, indent=4)
+        except Exception as e:
+            messagebox.showerror("Lỗi", f"Không thể lưu file cấu hình: {e}")
+    # --- HÀM ĐỌC BỘ THÔNG SỐ TỪ FILE CONFIG.JSON ---
+    def load_number(self):
+        if os.path.exists(CONFIG_FILE):
+            try:
+                with open(CONFIG_FILE, "r") as f:
+                    config_data = json.load(f)
+                    self.center_radius.set(config_data.get("center_radius", 300))
+            except Exception as e:
+                print(f"Lỗi khi đọc file config: {e}")               
+    # --- CÁC HÀM XỬ LÝ CHẾ ĐỘ AUTO ---
     def start_auto(self):
         """Bắt đầu chạy tự động"""
         self.is_auto_running = True
@@ -164,10 +350,11 @@ class PCBCheckerApp:
         """Vòng lặp tự động gọi hàm inspect_current_frame mỗi 1 giây"""
         if not self.is_auto_running:
             return
-
+        start_time = time.time()
         # Gọi hàm kiểm tra hiện tại của bạn
         status = self.inspect_current_frame()
 
+        elapsed_time = (time.time() - start_time) * 1000 # Quy đổi ra miligiây (ms)      
         # Nếu hàm inspect_current_frame của bạn trả về chuỗi "OK" hoặc "NG"
         if status in ["OK", "NG"]:
             self.total_count += 1
@@ -176,7 +363,9 @@ class PCBCheckerApp:
             else:
                 self.ng_count += 1
             self.lbl_stats.config(text=f"Số lần chạy: {self.total_count} | OK: {self.ok_count} | NG: {self.ng_count}")
-
+            # Cập nhật hiển thị lên giao diện ngay lập tức
+            self.lbl_stats.config(text=f"Số lần chạy: {self.total_count} | OK: {self.ok_count} | NG: {self.ng_count} | TB: {elapsed_time:.1f} ms"
+            )    
         # Lặp lại sau 1000ms (1 giây)
         self.root.after(1000, self.run_auto_loop)
 
@@ -192,6 +381,7 @@ class PCBCheckerApp:
             self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
             self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
+            self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
             # Khóa giá trị Phơi sáng cố định (Chỉnh số này tùy theo độ sáng môi trường)
             self.cap.set(cv2.CAP_PROP_EXPOSURE, -6) 
 
@@ -202,6 +392,10 @@ class PCBCheckerApp:
             # Chỉ cho phép bộ đệm lưu tối đa 1 frame
             self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
+            self.cap.set(cv2.CAP_PROP_EXPOSURE, -8)
+            self.cap.set(cv2.CAP_PROP_GAIN, 0)
+            self.cap.set(cv2.CAP_PROP_BRIGHTNESS, 1) # Giảm độ sáng tổng thể
+
             self.is_camera_connected = True
             print("[OK] Đã kết nối thành công Camera!")
             self.lbl_result.config(text="KẾT QUẢ: ĐANG LIVE CAMERA", fg="gray")
@@ -210,7 +404,7 @@ class PCBCheckerApp:
             print("[WARNING] Không thể kết nối Camera. Đang đợi cắm lại...")
 
     def update_video_stream(self):
-        next_delay = 34  # ĐÚNG 33ms (~30 FPS)
+        next_delay = 33  # ĐÚNG 33ms (~30 FPS)
         """Hiển thị luồng Live View giữ nguyên tỷ lệ camera (480x360 hoặc 640x480)"""
         if self.cap is not None and self.cap.isOpened():
             ret, frame = self.cap.read()    
@@ -227,6 +421,18 @@ class PCBCheckerApp:
                 img_tk = ImageTk.PhotoImage(img_pil)
                 self.panel_main.config(image=img_tk)
                 self.panel_main.image = img_tk
+                # --- B. TRUYỀN VIDEO LIVE SANG CỬA SỔ FULLSCREEN (Nếu đang mở) ---
+                if hasattr(self, 'panel_fullscreen') and self.panel_fullscreen is not None:
+                    # Lấy kích thước màn hình máy tính để phóng to vừa khít
+                    screen_w = self.fullscreen_window.winfo_screenwidth()
+                    screen_h = self.fullscreen_window.winfo_screenheight()
+
+                    img_full = img_pil.resize((screen_w, screen_h))
+                    img_full_tk = ImageTk.PhotoImage(image=img_full)
+
+                    # Đẩy frame trực tiếp lên panel cửa sổ fullscreen
+                    self.panel_fullscreen.config(image=img_full_tk)
+                    self.panel_fullscreen.image = img_full_tk # Bắt buộc phải có dòng này để không bị mất ảnh
             else:
                 # Mất khung hình (Tuột cáp giữa chừng)
                 self.handle_camera_loss()
@@ -241,7 +447,7 @@ class PCBCheckerApp:
         if not hasattr(self, 'frame_count'):
             self.frame_count = 0
         self.frame_count += 1
-        if self.frame_count % 500 == 0:  # Cứ 100 frames dọn RAM 1 lần
+        if self.frame_count % 500 == 0:  # Cứ 500 frames dọn RAM 1 lần
             gc.collect()
         self.root.after(next_delay, self.update_video_stream)
 
@@ -276,7 +482,68 @@ class PCBCheckerApp:
 
         # 4. Thử khởi tạo lại Camera
         self.init_camera()
+    def open_fullscreen_live(self):
+        """Mở cửa sổ hiển thị Live Camera toàn màn hình"""
+        if self.fullscreen_window is not None and self.fullscreen_window.winfo_exists():
+            return # Nếu đã mở rồi thì không mở thêm
 
+        # 1. Tạo cửa sổ Toplevel
+        self.fullscreen_window = tk.Toplevel(self.root)
+        self.fullscreen_window.title("LIVE CAMERA - FULLSCREEN")
+        
+        # 2. Bật chế độ Fullscreen phủ kín màn hình
+        self.fullscreen_window.attributes("-fullscreen", True)
+        self.fullscreen_window.configure(bg="black")
+
+        # 3. Thêm Label hiển thị ảnh chiếm trọn cửa sổ mới
+        self.panel_fullscreen = tk.Label(self.fullscreen_window, bg="black")
+        self.panel_fullscreen.pack(fill="both", expand=True)
+
+        # 4. Thêm nút Thoát nhỏ ở góc trên bên phải
+        btn_close = tk.Button(
+            self.fullscreen_window, text="✕ THOÁT (ESC)", command=self.close_fullscreen_live,
+            font=("Arial", 10, "bold"), bg="#f44336", fg="white", bd=0, padx=10, pady=5
+        )
+        # Đặt nút đè lên góc trên bên phải bằng place
+        btn_close.place(relx=0.99, rely=0.01, anchor="ne")
+
+        # 5. Bắt sự kiện ấn phím ESC hoặc Click đúp để thoát Fullscreen
+        self.fullscreen_window.bind("<Escape>", lambda e: self.close_fullscreen_live())
+        self.panel_fullscreen.bind("<Double-Button-1>", lambda e: self.close_fullscreen_live())
+
+    def close_fullscreen_live(self):
+        """Đóng cửa sổ toàn màn hình"""
+        if self.fullscreen_window is not None:
+            self.fullscreen_window.destroy()
+            self.fullscreen_window = None
+            self.panel_fullscreen = None
+    def on_closing(self):
+        """Khi đóng app: Giữ nguyên cấu hình cũ, chỉ cập nhật 3 số đếm sản lượng"""
+        try:
+            data = {}
+            # Step 1: Đọc lại file cũ nếu có để giữ nguyên 3 thông số cấu hình
+            if os.path.exists(CONFIG_FILE):
+                with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            
+    # 2. Rút giá trị int từ IntVar ra bằng .get() trước khi lưu JSON
+            data["total_count"] = self.total_count.get() if isinstance(self.total_count, tk.IntVar) else self.total_count
+            data["ok_count"] = self.ok_count.get() if isinstance(self.ok_count, tk.IntVar) else self.ok_count
+            data["ng_count"] = self.ng_count.get() if isinstance(self.ng_count, tk.IntVar) else self.ng_count
+
+            # 3. Ghi đè lại file JSON
+            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=4, ensure_ascii=False)
+
+            # Step 3: Ghi đè lại file
+            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=4, ensure_ascii=False)
+            
+            print("Đã bảo lưu thành công 3 thông số sản lượng!")
+        except Exception as e:
+            print(f"Lỗi khi lưu sản lượng trước khi thoát: {e}")
+        finally:
+            self.root.destroy()
     def detect_connector_pose(self):
         """
         Hàm riêng chuyên phát hiện Tâm (cx, cy) và Phân loại Góc lệch (0 deg hoặc 30 deg) của Connector.
@@ -311,7 +578,7 @@ class PCBCheckerApp:
             # 1. TÌM VÒNG TRÒN CYAN (INNER CIRCLE) TÌM TÂM
             circles = cv2.HoughCircles(
                 blurred, cv2.HOUGH_GRADIENT, dp=1.2, minDist=100,
-                param1=100, param2=50, minRadius=290, maxRadius=350
+                param1=100, param2=50, minRadius=int(self.center_radius.get()*0.9), maxRadius=int(self.center_radius.get()*1.1)
             )
 
             if circles is not None:
@@ -341,7 +608,7 @@ class PCBCheckerApp:
                                 px = int(cx + r * cos_a)
                                 py = int(cy + r * sin_a)
                                 if 0 <= px < img_w and 0 <= py < img_h:
-                                    if magnitude[py, px] > 30:
+                                    if magnitude[py, px] > self.config_magnitude.get():
                                         if r > max_r_at_angle:
                                             max_r_at_angle = r
                         total_score += max_r_at_angle
@@ -385,18 +652,17 @@ class PCBCheckerApp:
         avg_angle_offset = 0.0 if abs(avg_angle_offset) < 15.0 else 30.0
 
         return avg_cx, avg_cy, avg_r_in, avg_angle_offset, last_frame
-    
     def process_image(self, img,cx=None, cy=None,r_input=None, angle_offset=0.0):
         """Giữ nguyên 100% Thuật toán gốc của bạn"""
         if img is None or cx is None or cy is None or r_input is None:
             return None, None, "Không có dữ liệu ảnh!", []
         # Ép kiểu dữ liệu an toàn
         cx, cy, r_input = int(cx), int(cy), int(r_input)
-        r_input1=int(r_input*1.16)
+        r_input1=int(r_input*1.1)
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         blurred = cv2.GaussianBlur(gray, (3, 3), 0)
         ear_max_height = 100 
-        r_out = int(r_input*1.4)
+        r_out = int(r_input*1.3)
         # Vẽ vòng Cyan và vòng Vàng
         cv2.circle(img, (cx, cy), r_input, (255, 255, 0), 2)       # Cyan
         #cv2.circle(img, (cx, cy), r_out, (0, 255, 255), 2)     # Vàng
@@ -413,7 +679,9 @@ class PCBCheckerApp:
         magnitude = cv2.magnitude(grad_x, grad_y)
         magnitude = cv2.normalize(magnitude, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
 
-        _, edge_map_bw = cv2.threshold(magnitude, 30, 255, cv2.THRESH_BINARY)
+        _, edge_map_bw = cv2.threshold(magnitude, self.config_magnitude.get(), 255, cv2.THRESH_BINARY)
+        # Chỉ lấy cạnh nằm NGOÀI nền xanh PCB (tức là cạnh của Connector/Kim loại)
+        # edge_map_bw = cv2.bitwise_and(edge_map_bw, cv2.bitwise_not(pcb_mask))
         edge_map_display = cv2.cvtColor(edge_map_bw, cv2.COLOR_GRAY2BGR)
         
         cv2.circle(edge_map_display, (cx, cy), r_input, (255, 255, 0), 1)
@@ -434,7 +702,8 @@ class PCBCheckerApp:
         distances = []
         ear_crop_images = []
         ear_data_draw = []
-
+        minimum_point = int(0.021*r_input)
+        minimum_point = max(minimum_point, 3)
         for mid_angle in DYNAMIC_FIXED_ANGLES:
             a_start = mid_angle - sector_angle
             a_end = mid_angle + sector_angle
@@ -448,25 +717,23 @@ class PCBCheckerApp:
                     px = int(cx + r * cos_a)
                     py = int(cy + r * sin_a)
                     if 0 <= px < img.shape[1] and 0 <= py < img.shape[0]:
-                        if magnitude[py, px] > 30: # Ngưỡng cạnh
+                        if magnitude[py, px] > self.config_magnitude.get(): # Ngưỡng cạnh
                             gx, gy = grad_x[py, px], grad_y[py, px]
                             edge_angle = math.degrees(math.atan2(gy, gx))
                             angle_diff = abs(edge_angle - angle) % 180
                             if angle_diff > 90: angle_diff = 180 - angle_diff
 
                             # Lọc đúng cạnh tiếp tuyến
-                            if angle_diff < 18:# chọn số ngẫu nhiên
+                            if angle_diff < 20:# chọn số ngẫu nhiên
                                 valid_edge_points.append((px, py, r, cos_a, sin_a))
 
             # 2. PHÂN NHÓM THEO BÁN KÍNH VÀ CHỌN ĐOẠN CẠNH DÀI NHẤT (NẰM Ở NGOÀI)
             best_dist_for_ear = 0
             best_p_start, best_p_end = (cx, cy), (cx, cy)
-
-            if len(valid_edge_points) >= 13:#(12 độ * 2pi*rin*20%/360 độ)
+            if len(valid_edge_points) >=minimum_point: # (12 độ * 2pi*rin*10%/360 độ)
                 # Gom nhóm các điểm có bán kính r gần nhau (sai số 5px)
                 from collections import defaultdict
                 clusters = defaultdict(list)
-
                 # Góc pháp tuyến định hướng của vùng tai hiện tại
                 rad_mid = math.radians(mid_angle)
                 cos_mid, sin_mid = math.cos(rad_mid), math.sin(rad_mid)
@@ -479,30 +746,50 @@ class PCBCheckerApp:
                     # Gom nhóm các điểm thuộc CÙNG MỘT ĐƯỜNG THẲNG (có d chênh lệch <= 3px)
                     grouped = False
                     for k in clusters.keys():
-                        if abs(d_val - k) <= 3:
+                        if abs(d_val - k) <= 5:
                             clusters[k].append(pt)
                             grouped = True
                             break
                     if not grouped:
                         clusters[d_val].append(pt)
-                # ƯU TIÊN 1: Tìm đường thẳng có NHIỀU ĐIỂM NHẤT (Cạnh dài nhất)
-                # ƯU TIÊN 2: Chọn đường thẳng nằm XA TÂM NHẤT (d LỚN NHẤT)
-                best_cluster = max(clusters.values(), key=lambda group: (
-                    len(group), 
-                    np.mean([(p[0] - cx_f) * cos_mid + (p[1] - cy_f) * sin_mid for p in group])
-                ))
+                # # ƯU TIÊN 1: Tìm đường thẳng có NHIỀU ĐIỂM NHẤT (Cạnh dài nhất)
+                # # ƯU TIÊN 2: Chọn đường thẳng nằm XA TÂM NHẤT (d LỚN NHẤT)
+                # best_cluster = max(clusters.values(), key=lambda group: ( 
+                #     np.mean([(p[0] - cx_f) * cos_mid + (p[1] - cy_f) * sin_mid for p in group], len(group))
+                # ))
+                # 1. Lọc ra danh sách (list) các cụm thỏa mãn độ dài tối thiểu
+                valid_clusters = [g for g in clusters.values() if len(g) >= minimum_point]
+                # ƯU TIÊN 1: Chọn đường thẳng nằm XA TÂM NHẤT (d LỚN NHẤT)
+                # ƯU TIÊN 2: Tìm đường thẳng có NHIỀU ĐIỂM NHẤT (Cạnh dài nhất)
+                # 2. Kiểm tra nếu list không rỗng mới tìm cụm xa nhất
+                if valid_clusters:
+                    best_cluster = max(valid_clusters, key=lambda group: (  # Bỏ .values()
+                        np.mean([(p[0] - cx_f) * cos_mid + (p[1] - cy_f) * sin_mid for p in group]), # Ưu tiên 1: Xa tâm nhất
+                        len(group)                                                                 # Ưu tiên 2: Nhiều điểm nhất
+                    ))
+                else:
+                    best_cluster = None  # Bỏ qua nếu không có cụm nào đủ độ dài
                 if best_cluster:
                     # 1. Để lấy đúng 2 đầu mép tai của ĐƯỜNG THẲNG, ta sắp xếp theo thứ tự góc quét
                     best_cluster.sort(key=lambda item: item[3]) # Sắp xếp theo cos_a hoặc góc
                     
-                    p_first = (best_cluster[0][0], best_cluster[0][1])   # Đầu mép thẳng
-                    p_last = (best_cluster[-1][0], best_cluster[-1][1])   # Cuối mép thẳng
+                    p_first = np.array([best_cluster[0][0], best_cluster[0][1]])
+                    p_last = np.array([best_cluster[-1][0], best_cluster[-1][1]])
+                    # 2. Trung điểm tọa độ thực tế (X, Y) của mép ngoài
+                    mid_pt = (p_first + p_last) / 2.0
+                    px_mid, py_mid = mid_pt[0], mid_pt[1]
+                    # 3. Tính khoảng cách chính xác từ tâm (cx_f, cy_f) đến trung điểm này
+                    r_found_exact = np.hypot(px_mid - cx_f, py_mid - cy_f)
+                    # 4. Góc chuẩn của trung điểm
+                    angle_mid = np.arctan2(py_mid - cy_f, px_mid - cx_f)
+                    # 5. Khoảng cách tai chuẩn
+                    best_dist_for_ear = r_found_exact - r_input
 
                     # 2. Điểm vuông góc chính giữa để đo khoảng cách tai
                     mid_idx = len(best_cluster) // 2
                     px, py, r_found, cos_a, sin_a = best_cluster[mid_idx]
 
-                    best_dist_for_ear = r_found - r_input
+                    #best_dist_for_ear = r_found - r_input
                     best_p_start = (int(cx + r_input * cos_a), int(cy + r_input * sin_a))
                     best_p_end = (px, py)
 
@@ -527,7 +814,7 @@ class PCBCheckerApp:
 
         for i in range(6):
             dist = distances[i]
-            if dist <= (r_input*4/21) or dist < 0.70 * max_d:
+            if ((dist*1.575/r_input) < self.spec_mm.get()) or (dist < 0.6 * max_d):#val_px*1.575/avg_r_in
                 color = (0, 0, 255)
                 status = "NG"
                 is_ng = True
@@ -540,7 +827,7 @@ class PCBCheckerApp:
         status_text = "NG" if is_ng else "OK"
         return img, edge_map_display, status_text, ear_data
 
-    def inspect_current_frame(self):
+    def inspect_current_frame(self,event=None):
         """
         Kích hoạt kiểm tra: Chụp 10 frame liên tiếp -> Lấy trung bình kích thước 6 tai -> Hiển thị
         """
@@ -548,6 +835,8 @@ class PCBCheckerApp:
         if self.cap is None or not self.cap.isOpened():
             messagebox.showwarning("Cảnh báo", "Camera chưa được kết nối!")
             return
+        # 1. BẮT ĐẦU ĐO THỜI GIAN
+        start_time = time.time()
         # Vô hiệu hóa nút bấm tạm thời để người dùng không bấm dồn dập
         self.btn_inspect.config(state="disabled", text="⏳ ĐANG KIỂM TRA CONECTOR...")
         self.lbl_result.config(text="CHEKING... ", fg="green")
@@ -576,8 +865,8 @@ class PCBCheckerApp:
             ret, frame = self.cap.read()
             if not ret or frame is None:
                 continue
-
             last_clean_frame = frame.copy()
+            
 
             # Chạy thuật toán xử lý ảnh trên frame hiện tại
             processed_img, edge_img, status, ear_data = self.process_image(frame,cx=avg_cx,cy=avg_cy,r_input=avg_r_in,angle_offset=avg_angle_offset)
@@ -592,6 +881,10 @@ class PCBCheckerApp:
                     except ValueError:
                         all_distances[i].append(0.0)
         ok_count = status_list.count("OK")
+
+        ret, anhgoc = self.cap.read()
+        anhgoc_show = anhgoc.copy()
+
         # Mở lại nút bấm sau khi chụp xong
         self.btn_inspect.config(state="normal", text="🔍 KIỂM TRA CONNECTOR")
 
@@ -602,12 +895,12 @@ class PCBCheckerApp:
         avg_distances = []
         for i in range(6):
             dists = all_distances[i]
-            if len(dists) >= 3:
+            if len(dists) >= 2:
                 dists.sort()
-                valid_dists = dists[1:-1] # Loại bỏ 1 Min và 1 Max
+                valid_dists = dists[1:] # Chỉ bỏ 1 phần tử nhỏ nhất (dists[0])
                 avg_d = sum(valid_dists) / len(valid_dists)
-            elif len(dists) > 0:
-                avg_d = sum(dists) / len(dists)
+            elif len(dists) == 1:
+                avg_d = dists[0]
             else:
                 avg_d = 0.0
             final_px = math.ceil(avg_d)
@@ -632,9 +925,9 @@ class PCBCheckerApp:
         for i in range(6):
             avg_d = avg_distances[i]
             crop_img, _, _, _ = ear_data[i] if i < len(ear_data) else (None, "", "", (0,0,0))
-            avg_r_in
+            
             # Điều kiện đánh giá OK/NG dựa trên trung bình
-            if (avg_d <= (avg_r_in*4/21)) or avg_d < 0.65 * max_avg_d:
+            if ((avg_d*1.575/avg_r_in) < self.spec_mm.get()) or avg_d < 0.6 * max_avg_d:#val_px*1.575/avg_r_in
                 color = (0, 0, 255) # Đỏ
                 ear_status = "NG"
                 is_ng = True
@@ -644,10 +937,15 @@ class PCBCheckerApp:
 
             final_ear_data.append((crop_img, f"{avg_d}px", ear_status, color))
         # Cập nhật nhãn kết quả chung
+        Goods_good = False
+        Result_status = "NG"
         if is_ng and is_ng_count:
             self.lbl_result.config(text="RESULT: NOT GOOD (NG) ", fg="red")
+            Result_status = "NG"
         else:
             self.lbl_result.config(text="RESULT: OK ", fg="green")
+            Goods_good = True
+            Result_status = "OK"
 
         # 5. CẮT VÙNG PHÓNG TO CONNECTOR VÀ HIỂN THỊ LÊN UI (GIỮ NGUYÊN CODE CỦA BẠN)
         h_img, w_img = processed_img.shape[:2]
@@ -684,7 +982,7 @@ class PCBCheckerApp:
 
 
         full_result_img = last_clean_frame
-
+        val_um_list = []
         if full_result_img is not None and full_result_img.size > 0:
             # --- 1. VẼ THÔNG SỐ 6 TAI LÊN ẢNH GỐC TẠI TỌA ĐỘ CỰC ---
             if 'avg_cx' in locals() and 'avg_cy' in locals() and 'avg_r_in' in locals():
@@ -699,8 +997,10 @@ class PCBCheckerApp:
                     try:
                         val_px = float(str(avg_area_str).replace("px", "").strip())
                         val_um = val_px*1.575/avg_r_in;
+                        # Thêm giá trị vừa tính vào danh sách
+                        val_um_list.append(val_um)
                         if(val_um>0):
-                            display_val = f"{val_um:.3f} mm"
+                            display_val = f"{val_um:.4f} mm"
                         else:    
                             display_val = f"Không tìm thấy..."
                     except ValueError:
@@ -790,29 +1090,7 @@ class PCBCheckerApp:
 
                 # --- 2. CẮT VÙNG CONNECTOR THEO TÂM VÀ BÁN KÍNH ---
                 R_crop = int(avg_r_in + 110)
-                h_img, w_img = full_result_img.shape[:2]
-
-                # # 1. Tính tỉ lệ % OK từ danh sách kết quả hoặc số lần đếm
-                # text = f"OK: {ok_percentage:.1f}%"
-                # # 3. Chọn font chữ và độ phóng đại (scale)
-                # font = cv2.FONT_HERSHEY_SIMPLEX
-                # font_scale = 1.0        # Độ lớn của chữ (tùy chỉnh nếu muốn to/nhỏ hơn)
-                # thickness = 1           # Độ dày nét chữ
-                # # 4. Tính toán kích thước khối chữ để canh giữa chính xác
-                # (text_w, text_h), baseline = cv2.getTextSize(text, font, font_scale, thickness)
-
-                # # Tọa độ góc dưới bên trái của chữ để chữ nằm đúng CHÍNH GIỮA TÂM
-                # text_x = int((w_img - text_w) / 2)
-                # text_y = int((h_img + text_h) / 2)
-
-                # # 5. Vẽ viền đen xung quanh chữ (giúp chữ nổi bật trên mọi nền ảnh)
-                # cv2.putText(processed_img, text, (text_x, text_y), font, font_scale, (0, 0, 0), thickness + 4, cv2.LINE_AA)
-
-                # # 6. Vẽ chữ màu XANH LÁ (nếu Đạt) hoặc ĐỎ (nếu NG) lên giữa ảnh
-                # color = (0, 255, 0) if ok_percentage >= 50 else (0, 0, 255) # BGR
-                # cv2.putText(processed_img, text, (text_x, text_y), font, font_scale, color, thickness, cv2.LINE_AA)               
-
-
+                h_img, w_img = full_result_img.shape[:2]            
                 x1 = max(0, int(avg_cx - R_crop))
                 y1 = max(0, int(avg_cy - R_crop))
                 x2 = min(w_img, int(avg_cx + R_crop))
@@ -848,6 +1126,46 @@ class PCBCheckerApp:
             self.lbl_full_result.image = img_tk
         else:
             print("[WARNING] full_result_img bị None hoặc rỗng, không thể hiển thị!")
+
+        elapsed_time = (time.time() - start_time) * 1000 # Quy đổi ra miligiây (ms)      
+        # Nếu hàm inspect_current_frame của bạn trả về chuỗi "OK" hoặc "NG"
+        self.total_count_run +=1
+        self.total_count.set(self.total_count.get() + 1)
+        if Goods_good==True:
+            self.ok_count.set(self.ok_count.get() + 1)
+        else:
+            self.ng_count.set(self.ng_count.get() + 1)
+
+        self.total_execution_time += elapsed_time
+        self.avg_execution_time = self.total_execution_time / self.total_count_run
+        ok_rate = (self.ok_count.get() / self.total_count.get()) * 100
+
+
+        # Cập nhật thông số lên cột bên phải
+        self.lbl_total.config(text=f"Tổng số lần chạy: {self.total_count.get()}")
+        self.lbl_ok_ng.config(text=f"OK: {self.ok_count.get()}  |  NG: {self.ng_count.get()}")
+        self.lbl_rate.config(text=f"Tỉ lệ OK (Rate): {ok_rate:.1f}%")
+        self.lbl_time.config(text=f"Thời gian TB: {self.avg_execution_time:.1f} ms")
+
+        # 2. KẾT THÚC ĐO THỜI GIAN LẦN CHẠY NÀY
+        orig_filename = os.path.join(IMAGE_DIR, f"num{self.total_count.get()}_{Result_status}goc.jpg")
+        drawn_filename = os.path.join(IMAGE_DIR, f"num{self.total_count.get()}_{Result_status}ve.jpg")
+        # 2. Tự động lưu 2 ảnh vào thư mục 'Hinh_Anh_Kiem_Tra'
+        cv2.imwrite(orig_filename, anhgoc_show)
+        cv2.imwrite(drawn_filename, full_result_img)
+        # Làm tròn 2 chữ số cho toàn bộ mảng trước khi ghép chuỗi
+        safe_list = val_um_list + [0.0] * (6 - len(val_um_list))
+        ears_formatted = [f"{v:.2f}" for v in safe_list]
+        log_msg = (
+            f"number={self.total_count.get()}, Result: {Result_status}, "
+            f"Tai0: {ears_formatted[0]}| "
+            f"Tai1: {ears_formatted[1]}| "
+            f"Tai2: {ears_formatted[2]}| "
+            f"Tai3: {ears_formatted[3]}| "
+            f"Tai4: {ears_formatted[4]}| "
+            f"Tai5: {ears_formatted[5]}. "
+        )
+        write_log(log_msg)                 
         return ear_status
     def __del__(self):
         if self.cap is not None and self.cap.isOpened():

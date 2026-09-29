@@ -59,42 +59,7 @@ def get_best_camera_index():
     
     # Nếu không có Cam 1 thì quay về Cam 0 (Webcam có sẵn trên máy)
     return 0
-class CameraVideoStream:
-    def __init__(self, src=0):
-        self.cap = cv2.VideoCapture(src, cv2.CAP_DSHOW)
-        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
-        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        
-        self.ret, self.frame = self.cap.read()
-        self.stopped = False
-        self.lock = threading.Lock()
 
-    def start(self):
-        # Khởi chạy luồng đọc camera ngầm độc lập
-        t = threading.Thread(target=self.update, daemon=True)
-        t.start()
-        return self
-
-    def update(self):
-        while not self.stopped:
-            ret, frame = self.cap.read()
-            if ret:
-                with self.lock:
-                    self.ret = ret
-                    self.frame = frame
-            else:
-                time.sleep(0.005)
-
-    def read(self):
-        # Lấy frame mới nhất một cách an toàn giữa các luồng (Thread-safe)
-        with self.lock:
-            return self.ret, self.frame.copy() if self.frame is not None else (False, None)
-
-    def stop(self):
-        self.stopped = True
-        self.cap.release()
 class PCBCheckerApp:
     def __init__(self, root):
         self.root = root
@@ -273,7 +238,6 @@ class PCBCheckerApp:
             font=("Arial", 9, "bold"), bg="#FF9800", fg="white", padx=10, pady=3
         )
         self.btn_save_config.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(5, 0))
-        self.cam_stream = CameraVideoStream(0).start()
             # Chạy luồng cập nhật video trực tiếp
         self.update_video_stream()
 
@@ -570,64 +534,99 @@ class PCBCheckerApp:
         # 1. TIỀN TÍNH TOÁN RADIAN CHẤM ĐIỂM HỆ GÓC
         BASE_SET_0  = [0, 60, 120, 180, 240, 300]   # Hệ 0 độ
         BASE_SET_30 = [30, 90, 150, 210, 270, 330] # Hệ 30 độ
+        # 1. KHAI BÁO HỆ SỐ CO DÃN (CONRESIZE)
+        # CONRESIZE = 2.0 -> Thu nhỏ 1/2 (50%)
+        # CONRESIZE = 3.0 -> Thu nhỏ 1/3 (33.3%)
+        CONRESIZE = 8.0  
+        scale_factor = (1.0 / CONRESIZE)
 
         angles_0  = np.array([(b + da) % 360 for b in BASE_SET_0 for da in range(-3, 4)])
         angles_30 = np.array([(b + da) % 360 for b in BASE_SET_30 for da in range(-3, 4)])
         rads_0  = np.radians(angles_0)
         rads_30 = np.radians(angles_30)
 
-        # 2. XỬ LÝ ẢNH THU NHỎ (DOWN SCALE 50%) ĐỂ TÌM TÂM
-        # 1. TẠO ẢNH CANNY EDGE (Như ảnh 1 bạn chụp cực đẹp)
+        # 2. XỬ LÝ ẢNH THU NHỎ THEO TỶ LỆ CONRESIZE
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        small_gray = cv2.resize(gray, (0, 0), fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA)
+        
+        # Resize theo scale_factor linh hoạt
+        small_gray = cv2.resize(gray, (0, 0), fx=scale_factor, fy=scale_factor, interpolation=cv2.INTER_AREA)
         small_blurred = cv2.GaussianBlur(small_gray, (3, 3), 0)
-        # Tự động tính ngưỡng Canny theo trung vị độ sáng (Otsu/Median Canny)
+        
+        # Tự động tính ngưỡng Canny Otsu
         high_thresh, _ = cv2.threshold(small_blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         low_thresh = 0.5 * high_thresh
         edges = cv2.Canny(small_blurred, low_thresh, high_thresh)
 
-        # 2. BÁN KÍNH MỤC TIÊU TRÊN ẢNH THU NHỎ
-        target_r = self.center_radius.get() / 2.0
-        small_min_r = int((self.center_radius.get() * 0.92) / 2)
-        small_max_r = int((self.center_radius.get() * 1.08) / 2)
+        # 3. CHIA BÁN KÍNH MỤC TIÊU THEO CONRESIZE
+        target_r = self.center_radius.get() / CONRESIZE
+        small_min_r = int((self.center_radius.get() * 0.92) / CONRESIZE)
+        small_max_r = int((self.center_radius.get() * 1.08) / CONRESIZE)
 
-        # 3. CHẠY HOUGH CIRCLES TRỰC TIẾP TRÊN ẢNH CANNY (Chuẩn xác 100%)
+        # 4. CHẠY HOUGH CIRCLES TRÊN ẢNH CANNY THU NHỎ
         circles = cv2.HoughCircles(
             edges, 
             cv2.HOUGH_GRADIENT, 
             dp=1.0, 
             minDist=20,
             param1=100, 
-            param2=20,   # Ngưỡng tích lũy nhỏ cho ảnh Canny
+            param2=20,
             minRadius=small_min_r, 
             maxRadius=small_max_r
         )
+        
         best_circle = None
         if circles is not None:
-            # Lấy vòng tròn đầu tiên (được đánh giá cao nhất)
+            # Lấy ứng viên đường tròn xếp đầu tiên từ Hough
             circles = np.uint16(np.around(circles))
             best_circle = circles[0][0] # (cx_s, cy_s, r_s)
-        if best_circle is None:
-                    print("[WARNING] Không tìm thấy Connector!")
-                    return None, None, None, None, frame
-        # 3. QUY ĐỔI TỌA ĐỘ VỀ ẢNH GỐC
-        cx_s, cy_s, r_in_s = best_circle
 
+        # BẮT LỖI NẾU KHÔNG TÌM THẤY CONNECTOR (DỌN SẠCH CÁC DÒNG IF DƯ THỪA)
         if best_circle is None:
             print("[WARNING] Không tìm thấy Connector!")
             return None, None, None, None, frame
+        # Tọa độ sơ bộ quy đổi lên ảnh gốc
+        best_circle_small = circles[0][0]
+        cx_coarse = float(best_circle_small[0] * CONRESIZE)
+        cy_coarse = float(best_circle_small[1] * CONRESIZE)
+        r_coarse  = float(best_circle_small[2] * CONRESIZE)
 
-        # 3. QUY ĐỔI TỌA ĐỘ VỀ ẢNH GỐC
-        cx_s, cy_s, r_in_s = float(best_circle[0]), float(best_circle[1]), float(best_circle[2])  
+        # =========================================================================
+        # BƯỚC 2: TÌM TÂM CHÍNH XÁC Tuyệt Đối (FINE SEARCH) TRÊN ROI ẢNH GỐC 100%
+        # =========================================================================
+        # Tạo khung ROI nhỏ bao quanh Connector (rộng hơn bán kính 20%)
+        margin = int(r_coarse * 1.25)
+        x1 = max(0, int(cx_coarse - margin))
+        y1 = max(0, int(cy_coarse - margin))
+        x2 = min(frame.shape[1], int(cx_coarse + margin))
+        y2 = min(frame.shape[0], int(cy_coarse + margin))
 
-        if best_circle is None:
-            print("[WARNING] Không tìm thấy Connector!")
-            # Tra ve 5 giá trị None theo đúng signature của hàm
-            return None, None, None, None, frame
-        cx = float(cx_s * 2.0)
-        cy = float(cy_s * 2.0)
-        r_in = float(r_in_s * 2.0)
+        # Cắt ROI trên ảnh gốc Full HD
+        roi_gray = gray[y1:y2, x1:x2]
+        roi_blurred = cv2.GaussianBlur(roi_gray, (3, 3), 0)
+        edges_roi = cv2.Canny(roi_blurred, 0.5 * high_thresh, high_thresh)
+
+        # Chạy HoughCircles chính xác cao trong ROI
+        fine_min_r = int(self.center_radius.get() * 0.92)
+        fine_max_r = int(self.center_radius.get() * 1.08)
+
+        fine_circles = cv2.HoughCircles(
+            edges_roi, cv2.HOUGH_GRADIENT, dp=1.0, minDist=20,
+            param1=100, param2=15, minRadius=fine_min_r, maxRadius=fine_max_r
+        )
+
+        if fine_circles is not None:
+            # Lấy tâm chính xác trong không gian ROI
+            cx_roi, cy_roi, r_in = fine_circles[0][0]
+            # Quy đổi tọa độ ROI về tọa độ toàn bộ ảnh gốc
+            cx = float(cx_roi + x1)
+            cy = float(cy_roi + y1)
+            r_in = float(r_in)
+        else:
+            # Nếu ROI không lọc được thì dùng tạm kết quả sơ bộ
+            cx, cy, r_in = cx_coarse, cy_coarse, r_coarse
+
         r_out = int(r_in * 1.4)
+
 
         # 4. CẮT ROI XUNG QUANH CONNECTOR VÀ CHẠY SOBEL
         pad = r_out + 15
