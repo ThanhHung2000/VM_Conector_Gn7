@@ -17,7 +17,8 @@ import threading
 CONFIG_FILE = "config.json"
 NUM_SAMPLES = 1
 NUM_SAMPLES_detect=1
-
+DUNG_SAI = 0.0127
+CONRESIZE = 4.0
 # =========================================================================
 # 1. HÀM TỰ ĐỘNG TẠO THƯ MỤC LƯU ẢNH VÀ LOG TẠI VỊ TRÍ FILE .EXE
 # =========================================================================
@@ -535,9 +536,6 @@ class PCBCheckerApp:
         BASE_SET_0  = [0, 60, 120, 180, 240, 300]   # Hệ 0 độ
         BASE_SET_30 = [30, 90, 150, 210, 270, 330] # Hệ 30 độ
         # 1. KHAI BÁO HỆ SỐ CO DÃN (CONRESIZE)
-        # CONRESIZE = 2.0 -> Thu nhỏ 1/2 (50%)
-        # CONRESIZE = 3.0 -> Thu nhỏ 1/3 (33.3%)
-        CONRESIZE = 8.0  
         scale_factor = (1.0 / CONRESIZE)
 
         angles_0  = np.array([(b + da) % 360 for b in BASE_SET_0 for da in range(-3, 4)])
@@ -600,6 +598,32 @@ class PCBCheckerApp:
         x2 = min(frame.shape[1], int(cx_coarse + margin))
         y2 = min(frame.shape[0], int(cy_coarse + margin))
 
+        # # Cắt ROI trên ảnh gốc Full HD
+        # roi_gray = gray[y1:y2, x1:x2]
+        # roi_blurred = cv2.GaussianBlur(roi_gray, (3, 3), 0)
+        # edges_roi = cv2.Canny(roi_blurred, 0.5 * high_thresh, high_thresh)
+
+        # # Chạy HoughCircles chính xác cao trong ROI
+        # fine_min_r = int(self.center_radius.get() * 0.92)
+        # fine_max_r = int(self.center_radius.get() * 1.08)
+
+        # fine_circles = cv2.HoughCircles(
+        #     edges_roi, cv2.HOUGH_GRADIENT, dp=1.0, minDist=20,
+        #     param1=100, param2=15, minRadius=fine_min_r, maxRadius=fine_max_r
+        # )
+
+        # if fine_circles is not None:
+        #     # Lấy tâm chính xác trong không gian ROI
+        #     cx_roi, cy_roi, r_in = fine_circles[0][0]
+        #     # Quy đổi tọa độ ROI về tọa độ toàn bộ ảnh gốc
+        #     cx = float(cx_roi + x1)
+        #     cy = float(cy_roi + y1)
+        #     r_in = float(r_in)
+        # else:
+        #     # Nếu ROI không lọc được thì dùng tạm kết quả sơ bộ
+        #     cx, cy, r_in = cx_coarse, cy_coarse, r_coarse
+
+        # r_out = int(r_in * 1.4)
         # Cắt ROI trên ảnh gốc Full HD
         roi_gray = gray[y1:y2, x1:x2]
         roi_blurred = cv2.GaussianBlur(roi_gray, (3, 3), 0)
@@ -610,26 +634,69 @@ class PCBCheckerApp:
         fine_max_r = int(self.center_radius.get() * 1.08)
 
         fine_circles = cv2.HoughCircles(
-            edges_roi, cv2.HOUGH_GRADIENT, dp=1.0, minDist=20,
-            param1=100, param2=15, minRadius=fine_min_r, maxRadius=fine_max_r
+            edges_roi,
+            cv2.HOUGH_GRADIENT,
+            dp=1.0,
+            minDist=20,
+            param1=100,
+            param2=15,
+            minRadius=fine_min_r,
+            maxRadius=fine_max_r,
         )
 
         if fine_circles is not None:
-            # Lấy tâm chính xác trong không gian ROI
-            cx_roi, cy_roi, r_in = fine_circles[0][0]
-            # Quy đổi tọa độ ROI về tọa độ toàn bộ ảnh gốc
-            cx = float(cx_roi + x1)
-            cy = float(cy_roi + y1)
-            r_in = float(r_in)
+            # 1. Lấy tâm thô từ HoughCircles
+            raw_cx_roi, raw_cy_roi, raw_r = fine_circles[0][0]
+
+            # 2. Tạo Mask đai đường tròn thickness=6 xung quanh tâm Hough để trích xuất điểm viền
+            mask_ring = np.zeros_like(edges_roi)
+            cv2.circle(
+                mask_ring,
+                (int(round(raw_cx_roi)), int(round(raw_cy_roi))),
+                int(round(raw_r)),
+                255,
+                thickness=6,
+            )
+
+            # 3. Lấy tọa độ điểm cạnh thực tế nằm trên đai đường tròn
+            edge_pts = cv2.bitwise_and(edges_roi, mask_ring)
+            y_idx, x_idx = np.where(edge_pts > 0)
+
+            if len(x_idx) >= 10:
+                # 4. TÍNH TÂM SUB-PIXEL TRỰC TIẾP (KÅSA CIRCLE FIT - BÌNH PHƯƠNG TỐI THIỂU)
+                X_pts = x_idx.astype(np.float64)
+                Y_pts = y_idx.astype(np.float64)
+
+                # Lập hệ phương trình A * [c0, c1, c2]^T = B
+                A_mat = np.column_stack([X_pts, Y_pts, np.ones_like(X_pts)])
+                B_mat = X_pts**2 + Y_pts**2
+
+                # Giải hệ bằng Least Squares
+                c_vec, _, _, _ = np.linalg.lstsq(A_mat, B_mat, rcond=None)
+
+                # Trích xuất cx_sub, cy_sub, r_sub lẻ
+                cx_roi_sub = c_vec[0] / 2.0
+                cy_roi_sub = c_vec[1] / 2.0
+                r_in_sub = np.sqrt(c_vec[2] + cx_roi_sub**2 + cy_roi_sub**2)
+
+                # Quy đổi về ảnh gốc (Giữ dạng FLOAT64)
+                cx = float(cx_roi_sub + x1)
+                cy = float(cy_roi_sub + y1)
+                r_in = float(r_in_sub)
+            else:
+                # Fallback nếu không lọc đủ điểm viền
+                cx = float(raw_cx_roi + x1)
+                cy = float(raw_cy_roi + y1)
+                r_in = float(raw_r)
         else:
             # Nếu ROI không lọc được thì dùng tạm kết quả sơ bộ
-            cx, cy, r_in = cx_coarse, cy_coarse, r_coarse
+            cx, cy, r_in = float(cx_coarse), float(cy_coarse), float(r_coarse)
 
-        r_out = int(r_in * 1.4)
-
-
+        # Giữ r_out dạng float để không làm mất phần thập phân ở các phép toán sau
+        r_out = r_in * 1.4
+        
         # 4. CẮT ROI XUNG QUANH CONNECTOR VÀ CHẠY SOBEL
-        pad = r_out + 15
+        pad = r_out
         x1, x2 = max(0, int(cx - pad)), min(img_w, int(cx + pad))
         y1, y2 = max(0, int(cy - pad)), min(img_h, int(cy + pad))
 
@@ -698,6 +765,7 @@ class PCBCheckerApp:
         if img is None or cx is None or cy is None or r_input is None:
             return None, None, "Không có dữ liệu ảnh!", []
         # Ép kiểu dữ liệu an toàn
+        cx_f, cy_f, r_input_f = float(cx), float(cy), float(r_input)
         cx, cy, r_input = int(cx), int(cy), int(r_input)
         r_input1=int(r_input*1.1)
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
@@ -743,8 +811,8 @@ class PCBCheckerApp:
         distances = []
         ear_crop_images = []
         ear_data_draw = []
-        minimum_point = int(0.021*r_input)
-        minimum_point = max(minimum_point, 5)
+        minimum_point = int(0.0167*r_input)
+        minimum_point = max(minimum_point, 3)
         for mid_angle in DYNAMIC_FIXED_ANGLES:
             a_start = mid_angle - sector_angle
             a_end = mid_angle + sector_angle
@@ -771,14 +839,13 @@ class PCBCheckerApp:
             # 2. PHÂN NHÓM THEO BÁN KÍNH VÀ CHỌN ĐOẠN CẠNH DÀI NHẤT (NẰM Ở NGOÀI)
             best_dist_for_ear = 0
             best_p_start, best_p_end = (cx, cy), (cx, cy)
-            if len(valid_edge_points) >=minimum_point: # (12 độ * 2pi*rin*10%/360 độ)
+            if len(valid_edge_points) >=minimum_point: # (12 độ * 2pi*rin*8%/360 độ)
                 # Gom nhóm các điểm có bán kính r gần nhau (sai số 5px)
                 from collections import defaultdict
                 clusters = defaultdict(list)
                 # Góc pháp tuyến định hướng của vùng tai hiện tại
                 rad_mid = math.radians(mid_angle)
                 cos_mid, sin_mid = math.cos(rad_mid), math.sin(rad_mid)
-                cx_f, cy_f = float(cx), float(cy)
                 for pt in valid_edge_points:
                     px, py = pt[0], pt[1]
                     # TÍNH KHOẢNG CÁCH VUÔNG GÓC (d) TỪ TÂM TỚI ĐƯỜNG THẲNG ĐI QUA POINT
@@ -814,31 +881,34 @@ class PCBCheckerApp:
                     # 1. Để lấy đúng 2 đầu mép tai của ĐƯỜNG THẲNG, ta sắp xếp theo thứ tự góc quét
                     best_cluster.sort(key=lambda item: item[3]) # Sắp xếp theo cos_a hoặc góc
                     
-                    p_first = np.array([best_cluster[0][0], best_cluster[0][1]])
-                    p_last = np.array([best_cluster[-1][0], best_cluster[-1][1]])
+                    p_first = np.array([float(best_cluster[0][0]), float(best_cluster[0][1])])
+                    p_last = np.array([float(best_cluster[-1][0]), float(best_cluster[-1][1])])
                     # 2. Trung điểm tọa độ thực tế (X, Y) của mép ngoài
                     mid_pt = (p_first + p_last) / 2.0
-                    px_mid, py_mid = mid_pt[0], mid_pt[1]
+                    px_mid, py_mid = float(mid_pt[0]), float(mid_pt[1])
                     # 3. Tính khoảng cách chính xác từ tâm (cx_f, cy_f) đến trung điểm này
                     r_found_exact = np.hypot(px_mid - cx_f, py_mid - cy_f)
                     # 4. Góc chuẩn của trung điểm
                     angle_mid = np.arctan2(py_mid - cy_f, px_mid - cx_f)
                     # 5. Khoảng cách tai chuẩn
-                    best_dist_for_ear = r_found_exact - r_input
+                    best_dist_for_ear = float(r_found_exact - r_input_f)
 
                     # 2. Điểm vuông góc chính giữa để đo khoảng cách tai
                     mid_idx = len(best_cluster) // 2
                     px, py, r_found, cos_a, sin_a = best_cluster[mid_idx]
 
                     #best_dist_for_ear = r_found - r_input
-                    best_p_start = (int(cx + r_input * cos_a), int(cy + r_input * sin_a))
-                    best_p_end = (px, py)
+                    best_p_start = (float(cx_f + r_input_f * cos_a), float(cy_f + r_input_f * sin_a))
+                    best_p_end = (float(px), float(py))
 
                     # Bây giờ vẽ lên inspect_frame thoải mái không sợ lỗi!
                     # cv2.line(img, p_first, p_last, (0, 0, 255), 2, cv2.LINE_AA)
-                    cv2.line(edge_map_display, p_first, p_last, (0, 255, 0), 2)
+                    # Ép kiểu từng phần tử [0] và [1] thành int
+                    pt1 = (int(p_first[0]), int(p_first[1]))
+                    pt2 = (int(p_last[0]), int(p_last[1]))
+                    cv2.line(edge_map_display, pt1, pt2, (0, 255, 0), 2)
             distances.append(best_dist_for_ear)
-            ear_data_draw.append((best_p_start, best_p_end))
+
 
             rad_m = math.radians(mid_angle)
             rx = int(cx + (r_input + ear_max_height / 2) * math.cos(rad_m))
@@ -848,6 +918,7 @@ class PCBCheckerApp:
             y1, y2 = max(0, ry - crop_size), min(img.shape[0], ry + crop_size)
             ear_crop_images.append(img[y1:y2, x1:x2].copy())
 
+        ear_data_draw.append((best_p_start, best_p_end))
         # 5. HIỂN THỊ KẾT QUẢ VÀ ĐÁNH GIÁ OK/NG
         max_d = max(distances) if max(distances) > 0 else 1
         is_ng = False
@@ -862,8 +933,8 @@ class PCBCheckerApp:
             else:
                 color = (0, 255, 0)
                 status = "OK"
-
-            ear_data.append((ear_crop_images[i], f"{dist}px", status, color))
+            dist_str = f"{dist:.2f}px"  # Sẽ ra dạng: 12.34px chứ không bị 12px
+            ear_data.append((ear_crop_images[i], dist_str, status, color))
 
         status_text = "NG" if is_ng else "OK"
         return img, edge_map_display, status_text, ear_data
@@ -928,7 +999,7 @@ class PCBCheckerApp:
                 return
         last_clean_frame = frame.copy()
         anhgoc_show = frame.copy()
-        avg_cx, avg_cy, avg_r_in, avg_angle_offset, last_frame = self.detect_connector_pose(frame)
+        avg_cx, avg_cy, avg_r_in, avg_angle_offset, last_frame = self.detect_connector_pose(frame) 
         # elapsed_time = (time.time() - start_time) * 1000 # Quy đổi ra miligiây (ms)  
         if avg_cx is None or last_frame is None:
             messagebox.showwarning("Cảnh báo", "Không tìm thấy Connector!")
@@ -954,7 +1025,6 @@ class PCBCheckerApp:
 
         # Mở lại nút bấm sau khi chụp xong
         self.btn_inspect.config(state="normal", text="🔍 KIỂM TRA CONNECTOR")
-
         if last_clean_frame is None:
             return
 
@@ -970,22 +1040,21 @@ class PCBCheckerApp:
                 avg_d = dists[0]
             else:
                 avg_d = 0.0
-            final_px = math.ceil(avg_d)
-            avg_distances.append(final_px)
-
+            # final_px = math.ceil(avg_d)
+            avg_distances.append(avg_d)
         if processed_img is None:
             return
-
         # 4. ĐÁNH GIÁ LẠI TRẠNG THÁI OK/NG DỰA TRÊN KHOẢNG CÁCH TRUNG BÌNH
         max_avg_d = max(avg_distances) if max(avg_distances) > 0 else 1.0
         is_ng = False
         final_ear_data = []
+        spec_input= self.spec_mm.get() + DUNG_SAI
         for i in range(6):
             avg_d = avg_distances[i]
             crop_img, _, _, _ = ear_data[i] if i < len(ear_data) else (None, "", "", (0,0,0))
             
             # Điều kiện đánh giá OK/NG dựa trên trung bình
-            if ((avg_d*1.575/avg_r_in) < self.spec_mm.get()) or avg_d < 0.6 * max_avg_d:#val_px*1.575/avg_r_in
+            if ((avg_d*1.575/avg_r_in) < spec_input) or avg_d < 0.6 * max_avg_d:#val_px*1.575/avg_r_in
                 color = (0, 0, 255) # Đỏ
                 ear_status = "NG"
                 is_ng = True
@@ -1215,7 +1284,7 @@ class PCBCheckerApp:
         cv2.imwrite(drawn_filename, full_result_img)
         # Làm tròn 2 chữ số cho toàn bộ mảng trước khi ghép chuỗi
         safe_list = val_um_list + [0.0] * (6 - len(val_um_list))
-        ears_formatted = [f"{v:.2f}" for v in safe_list]
+        ears_formatted = [f"{v:.4f}" for v in safe_list]
         log_msg = (
             f"number={self.total_count.get()}, Result: {Result_status}, "
             f"Tai0: {ears_formatted[0]}| "
